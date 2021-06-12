@@ -134,22 +134,23 @@ prop_connect :: (Int -> Int -> (Int, Int)) -> [Int] -> Bool
 prop_connect f xs =
     case runIdentity
            (connect
+             TokAsClient
              (reqRespClientPeer (reqRespClientMap xs))
              (reqRespServerPeer (reqRespServerMapAccumL (\a -> pure . f a) 0)))
 
-      of (c, s, TerminalStates TokDone TokDone) ->
+      of (c, s, TerminalStates SingDone ReflNobodyAgency ReflNobodyAgency) ->
            (s, c) == mapAccumL f 0 xs
 
 
 prop_connectPipelined :: [Bool] -> (Int -> Int -> (Int, Int)) -> [Int] -> Bool
 prop_connectPipelined cs f xs =
     case runIdentity
-           (connectPipelined cs
+           (connectPipelined TokAsClient cs
              (reqRespClientPeerPipelined (reqRespClientMapPipelined xs))
              (reqRespServerPeer          (reqRespServerMapAccumL
                                             (\a -> pure . f a) 0)))
 
-      of (c, s, TerminalStates TokDone TokDone) ->
+      of (c, s, TerminalStates SingDone ReflNobodyAgency ReflNobodyAgency) ->
            (s, c) == mapAccumL f 0 xs
 
 
@@ -186,20 +187,20 @@ prop_channel_ST f xs =
 instance (Arbitrary req, Arbitrary resp) =>
          Arbitrary (AnyMessageAndAgency (ReqResp req resp)) where
   arbitrary = oneof
-    [ AnyMessageAndAgency (ClientAgency TokIdle) . MsgReq <$> arbitrary
-    , AnyMessageAndAgency (ServerAgency TokBusy) . MsgResp <$> arbitrary
-    , return (AnyMessageAndAgency (ClientAgency TokIdle) MsgDone)
+    [ AnyMessageAndAgency . MsgReq <$> arbitrary
+    , AnyMessageAndAgency . MsgResp <$> arbitrary
+    , return (AnyMessageAndAgency MsgDone)
     ]
 
-  shrink (AnyMessageAndAgency a (MsgReq r))  =
-    [ AnyMessageAndAgency a (MsgReq r')
+  shrink (AnyMessageAndAgency (MsgReq r))  =
+    [ AnyMessageAndAgency (MsgReq r')
     | r' <- shrink r ]
 
-  shrink (AnyMessageAndAgency a (MsgResp r)) =
-    [ AnyMessageAndAgency a (MsgResp r')
+  shrink (AnyMessageAndAgency (MsgResp r)) =
+    [ AnyMessageAndAgency (MsgResp r')
     | r' <- shrink r ]
 
-  shrink (AnyMessageAndAgency _ MsgDone)     = []
+  shrink (AnyMessageAndAgency MsgDone)     = []
 
 instance (Eq req, Eq resp) => Eq (AnyMessage (ReqResp req resp)) where
   (AnyMessage (MsgReq  r1)) == (AnyMessage (MsgReq  r2)) = r1 == r2

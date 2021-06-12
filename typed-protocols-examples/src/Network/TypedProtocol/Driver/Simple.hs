@@ -35,6 +35,8 @@ module Network.TypedProtocol.Driver.Simple (
   runDecoderWithChannel,
   ) where
 
+import Data.Singletons
+
 import Network.TypedProtocol.Core
 import Network.TypedProtocol.Pipelined
 import Network.TypedProtocol.Driver
@@ -83,29 +85,35 @@ instance Show (AnyMessage ps) => Show (TraceSendRecv ps) where
   show (TraceRecvMsg msg) = "Recv " ++ show msg
 
 
-driverSimple :: forall ps failure bytes m.
+driverSimple :: forall ps (pr :: PeerRole) failure bytes m.
                 (MonadThrow m, Exception failure)
              => Tracer m (TraceSendRecv ps)
              -> Codec ps failure m bytes
              -> Channel m bytes
-             -> Driver ps (Maybe bytes) m
+             -> Driver ps pr (Maybe bytes) m
 driverSimple tracer Codec{encode, decode} channel@Channel{send} =
     Driver { sendMessage, recvMessage, startDState = Nothing }
   where
-    sendMessage :: forall (pr :: PeerRole) (st :: ps) (st' :: ps).
-                   PeerHasAgency pr st
+    sendMessage :: forall (st :: ps) (st' :: ps).
+                   SingI st
+                => (RelativeAgencyEq (StateAgency st)
+                                      WeHaveAgency
+                                     (Relative pr (StateAgency st)))
                 -> Message ps st st'
                 -> m ()
-    sendMessage stok msg = do
-      send (encode stok msg)
+    sendMessage _ msg = do
+      send (encode msg)
       traceWith tracer (TraceSendMsg (AnyMessage msg))
 
-    recvMessage :: forall (pr :: PeerRole) (st :: ps).
-                   PeerHasAgency pr st
+    recvMessage :: forall (st :: ps).
+                   SingI st
+                => (RelativeAgencyEq (StateAgency st)
+                                      TheyHaveAgency
+                                     (Relative pr (StateAgency st)))
                 -> Maybe bytes
                 -> m (SomeMessage st, Maybe bytes)
-    recvMessage stok trailing = do
-      decoder <- decode stok
+    recvMessage _ trailing = do
+      decoder <- decode
       result  <- runDecoderWithChannel channel trailing decoder
       case result of
         Right x@(SomeMessage msg, _trailing') -> do

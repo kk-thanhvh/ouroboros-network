@@ -37,17 +37,17 @@ reqRespClientPeer (SendMsgDone result) =
     -- 'done', with a return value.
     Effect $ do
       r <- result
-      return $ Yield (ClientAgency TokIdle) MsgDone (Done TokDone r)
+      return $ Yield ReflClientAgency MsgDone (Done ReflNobodyAgency r)
 
 reqRespClientPeer (SendMsgReq req next) =
 
     -- Send our message.
-    Yield (ClientAgency TokIdle) (MsgReq req) $
+    Yield ReflClientAgency (MsgReq req) $
 
     -- The type of our protocol means that we're now into the 'StBusy' state
     -- and the only thing we can do next is local effects or wait for a reply.
     -- We'll wait for a reply.
-    Await (ServerAgency TokBusy) $ \(MsgResp resp) ->
+    Await ReflServerAgency $ \(MsgResp resp) ->
 
     -- Now in this case there is only one possible response, and we have
     -- one corresponding continuation 'kPong' to handle that response.
@@ -112,18 +112,18 @@ reqRespClientPeerSender
 reqRespClientPeerSender (SendMsgDonePipelined result) =
   -- Send `MsgDone` and complete the protocol
   SenderYield
-    (ClientAgency TokIdle)
+    ReflClientAgency
     MsgDone
-    (SenderDone TokDone result)
+    (SenderDone ReflNobodyAgency result)
 
 reqRespClientPeerSender (SendMsgReqPipelined req receive next) =
   -- Pipelined yield: send `MsgReq`, immediately follow with the next step.
   -- Await for a response in a continuation.
   SenderPipeline
-    (ClientAgency TokIdle)
+    ReflClientAgency
     (MsgReq req)
     -- response handler
-    (ReceiverAwait (ServerAgency TokBusy) $ \(MsgResp resp) ->
+    (ReceiverAwait ReflServerAgency $ \(MsgResp resp) ->
         ReceiverEffect $ do
           x <- receive resp
           return (ReceiverDone x))

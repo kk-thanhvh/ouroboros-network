@@ -14,6 +14,7 @@ module Network.TypedProtocol.PingPong.Tests
   ) where
 
 
+import Network.TypedProtocol.Core
 import Network.TypedProtocol.Codec
 import Network.TypedProtocol.Proofs
 import Network.TypedProtocol.Channel
@@ -179,10 +180,11 @@ prop_connect :: NonNegative Int -> Bool
 prop_connect (NonNegative n) =
   case runIdentity
          (connect
+           TokAsClient
            (pingPongClientPeer (pingPongClientCount n))
            (pingPongServerPeer  pingPongServerCount))
 
-    of ((), n', TerminalStates TokDone TokDone) -> n == n'
+    of ((), n', TerminalStates SingDone ReflNobodyAgency ReflNobodyAgency) -> n == n'
 
 
 --
@@ -198,11 +200,11 @@ connect_pipelined :: PingPongClientPipelined Identity [Either Int Int]
                   -> (Int, [Either Int Int])
 connect_pipelined client cs =
   case runIdentity
-         (connectPipelined cs
+         (connectPipelined TokAsClient cs
             (pingPongClientPeerPipelined client)
             (pingPongServerPeer pingPongServerCount))
 
-    of (reqResps, n, TerminalStates TokDone TokDone) -> (n, reqResps)
+    of (reqResps, n, TerminalStates SingDone ReflNobodyAgency ReflNobodyAgency) -> (n, reqResps)
 
 
 -- | Using a client that forces maximum pipeling, show that irrespective of
@@ -310,9 +312,9 @@ prop_channel_ST n =
 
 instance Arbitrary (AnyMessageAndAgency PingPong) where
   arbitrary = elements
-    [ AnyMessageAndAgency (ClientAgency TokIdle) MsgPing
-    , AnyMessageAndAgency (ServerAgency TokBusy) MsgPong
-    , AnyMessageAndAgency (ClientAgency TokIdle) MsgDone
+    [ AnyMessageAndAgency MsgPing
+    , AnyMessageAndAgency MsgPong
+    , AnyMessageAndAgency MsgDone
     ]
 
 instance Eq (AnyMessage PingPong) where
