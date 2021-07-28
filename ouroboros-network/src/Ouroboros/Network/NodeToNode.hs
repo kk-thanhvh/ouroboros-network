@@ -107,7 +107,8 @@ import qualified Codec.CBOR.Term as CBOR
 import           Network.Mux (WithMuxBearer (..))
 import qualified Network.Socket as Socket
 
-import           Ouroboros.Network.Codec
+import           Network.TypedProtocol.Codec.CBOR
+
 import           Ouroboros.Network.Driver (TraceSendRecv(..))
 import           Ouroboros.Network.Driver.Simple (DecoderFailure)
 import           Ouroboros.Network.Driver.Limits (ProtocolLimitFailure (..))
