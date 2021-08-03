@@ -310,11 +310,11 @@ prop_channel_ST n =
 -- Codec properties
 --
 
-instance Arbitrary (AnyMessageAndAgency PingPong) where
+instance Arbitrary (AnyMessage PingPong) where
   arbitrary = elements
-    [ AnyMessageAndAgency MsgPing
-    , AnyMessageAndAgency MsgPong
-    , AnyMessageAndAgency MsgDone
+    [ AnyMessage MsgPing
+    , AnyMessage MsgPong
+    , AnyMessage MsgDone
     ]
 
 instance Eq (AnyMessage PingPong) where
@@ -323,20 +323,20 @@ instance Eq (AnyMessage PingPong) where
   AnyMessage MsgDone == AnyMessage MsgDone = True
   _                  ==                  _ = False
 
-prop_codec_PingPong :: AnyMessageAndAgency PingPong -> Bool
+prop_codec_PingPong :: AnyMessage PingPong -> Bool
 prop_codec_PingPong =
     prop_codec
       runIdentity
       codecPingPong
 
-prop_codec_splits2_PingPong :: AnyMessageAndAgency PingPong -> Bool
+prop_codec_splits2_PingPong :: AnyMessage PingPong -> Bool
 prop_codec_splits2_PingPong =
     prop_codec_splits
       splits2
       runIdentity
       codecPingPong
 
-prop_codec_splits3_PingPong :: AnyMessageAndAgency PingPong -> Bool
+prop_codec_splits3_PingPong :: AnyMessage PingPong -> Bool
 prop_codec_splits3_PingPong =
     prop_codec_splits
       splits3
@@ -348,13 +348,13 @@ prop_codec_splits3_PingPong =
 --
 
 prop_codec_cbor_PingPong
-  :: AnyMessageAndAgency PingPong
+  :: AnyMessage PingPong
   -> Bool
 prop_codec_cbor_PingPong msg =
   runST $ prop_codecM CBOR.codecPingPong msg
 
 prop_codec_cbor_splits2_PingPong
-  :: AnyMessageAndAgency PingPong
+  :: AnyMessage PingPong
   -> Bool
 prop_codec_cbor_splits2_PingPong msg =
   runST $ prop_codec_splitsM
@@ -363,7 +363,7 @@ prop_codec_cbor_splits2_PingPong msg =
       msg
 
 prop_codec_cbor_splits3_PingPong
-  :: AnyMessageAndAgency PingPong
+  :: AnyMessage PingPong
   -> Bool
 prop_codec_cbor_splits3_PingPong msg =
   runST $ prop_codec_splitsM

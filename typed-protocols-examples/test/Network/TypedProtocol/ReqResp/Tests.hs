@@ -185,22 +185,22 @@ prop_channel_ST f xs =
 --
 
 instance (Arbitrary req, Arbitrary resp) =>
-         Arbitrary (AnyMessageAndAgency (ReqResp req resp)) where
+         Arbitrary (AnyMessage (ReqResp req resp)) where
   arbitrary = oneof
-    [ AnyMessageAndAgency . MsgReq <$> arbitrary
-    , AnyMessageAndAgency . MsgResp <$> arbitrary
-    , return (AnyMessageAndAgency MsgDone)
+    [ AnyMessage . MsgReq <$> arbitrary
+    , AnyMessage . MsgResp <$> arbitrary
+    , return (AnyMessage MsgDone)
     ]
 
-  shrink (AnyMessageAndAgency (MsgReq r))  =
-    [ AnyMessageAndAgency (MsgReq r')
+  shrink (AnyMessage (MsgReq r))  =
+    [ AnyMessage (MsgReq r')
     | r' <- shrink r ]
 
-  shrink (AnyMessageAndAgency (MsgResp r)) =
-    [ AnyMessageAndAgency (MsgResp r')
+  shrink (AnyMessage (MsgResp r)) =
+    [ AnyMessage (MsgResp r')
     | r' <- shrink r ]
 
-  shrink (AnyMessageAndAgency MsgDone)     = []
+  shrink (AnyMessage MsgDone)     = []
 
 instance (Eq req, Eq resp) => Eq (AnyMessage (ReqResp req resp)) where
   (AnyMessage (MsgReq  r1)) == (AnyMessage (MsgReq  r2)) = r1 == r2
@@ -208,13 +208,13 @@ instance (Eq req, Eq resp) => Eq (AnyMessage (ReqResp req resp)) where
   (AnyMessage MsgDone)      == (AnyMessage MsgDone)      = True
   _                         == _                         = False
 
-prop_codec_ReqResp :: AnyMessageAndAgency (ReqResp String String) -> Bool
+prop_codec_ReqResp :: AnyMessage (ReqResp String String) -> Bool
 prop_codec_ReqResp =
     prop_codec
       runIdentity
       codecReqResp
 
-prop_codec_splits2_ReqResp :: AnyMessageAndAgency (ReqResp String String)
+prop_codec_splits2_ReqResp :: AnyMessage (ReqResp String String)
                            -> Bool
 prop_codec_splits2_ReqResp =
     prop_codec_splits
@@ -222,7 +222,7 @@ prop_codec_splits2_ReqResp =
       runIdentity
       codecReqResp
 
-prop_codec_splits3_ReqResp :: AnyMessageAndAgency (ReqResp String String)
+prop_codec_splits3_ReqResp :: AnyMessage (ReqResp String String)
                            -> Bool
 prop_codec_splits3_ReqResp =
     prop_codec_splits
@@ -231,13 +231,13 @@ prop_codec_splits3_ReqResp =
       codecReqResp
 
 prop_codec_cbor_ReqResp
-  :: AnyMessageAndAgency (ReqResp String String)
+  :: AnyMessage (ReqResp String String)
   -> Bool
 prop_codec_cbor_ReqResp msg =
   runST $ prop_codecM codecReqResp msg
 
 prop_codec_cbor_splits2_ReqResp
-  :: AnyMessageAndAgency (ReqResp String String)
+  :: AnyMessage (ReqResp String String)
   -> Bool
 prop_codec_cbor_splits2_ReqResp msg =
   runST $ prop_codec_splitsM
@@ -246,7 +246,7 @@ prop_codec_cbor_splits2_ReqResp msg =
       msg
 
 prop_codec_cbor_splits3_ReqResp
-  :: AnyMessageAndAgency (ReqResp String String)
+  :: AnyMessage (ReqResp String String)
   -> Bool
 prop_codec_cbor_splits3_ReqResp msg =
   runST $ prop_codec_splitsM

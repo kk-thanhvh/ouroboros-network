@@ -10,7 +10,7 @@
 {-# LANGUAGE TypeFamilies               #-}
 {-# LANGUAGE TypeInType                 #-}
 -- @UndecidableInstances@ extension is required for defining @Show@ instance of
--- @'AnyMessage'@ and @'AnyMessageAndAgency'@.
+-- @'AnyMessage'@ and @'AnyMessage'@.
 {-# LANGUAGE UndecidableInstances       #-}
 
 module Network.TypedProtocol.Codec (
@@ -29,7 +29,6 @@ module Network.TypedProtocol.Codec (
   , runDecoderPure
     -- ** Codec properties
   , AnyMessage(..)
-  , AnyMessageAndAgency(..)
   , prop_codecM
   , prop_codec
   , prop_codec_splitsM
@@ -279,36 +278,25 @@ runDecoderPure runM decoder bs = runM (runDecoder bs =<< decoder)
 -- Codec properties
 --
 
--- | Any message for a protocol, without knowing the protocol state.
---
--- Used at least for 'Eq' instances for messages, but also as a target for an
--- identity codec `Codec ps failure m (AnyMessage ps)` .
---
-data AnyMessage ps where
-     AnyMessage :: Message ps st st' -> AnyMessage ps
-
--- requires @UndecidableInstances@ and @QuantifiedConstraints@.
-instance (forall st st'. Show (Message ps st st')) => Show (AnyMessage ps) where
-    show (AnyMessage msg) = show msg
-
--- | Used to hold the 'PeerHasAgency' state token and a corresponding 'Message'.
+-- | Any message for a protocol, with a 'SingI' constratain which gives access
+-- to protocol state.
 --
 -- Used where we don't know statically what the state type is, but need the
 -- agency and message to match each other.
 --
-data AnyMessageAndAgency ps where
-  AnyMessageAndAgency :: forall ps (st :: ps) (st' :: ps).
-                         SingI st
-                      => Message ps (st :: ps) (st' :: ps)
-                      -> AnyMessageAndAgency ps
+data AnyMessage ps where
+  AnyMessage :: forall ps (st :: ps) (st' :: ps).
+                SingI st
+             => Message ps (st :: ps) (st' :: ps)
+             -> AnyMessage ps
 
 -- requires @UndecidableInstances@ and @QuantifiedConstraints@.
 instance
     ( forall (st :: ps) (st' :: ps). Show (Message ps st st')
     , forall (st :: ps). Show (sing st)
     , sing ~ Sing
-    ) => Show (AnyMessageAndAgency ps) where
-  show (AnyMessageAndAgency (msg :: Message ps st st')) = show (sing :: Sing st, msg)
+    ) => Show (AnyMessage ps) where
+  show (AnyMessage (msg :: Message ps st st')) = show (sing :: Sing st, msg)
 
 -- | The 'Codec' round-trip property: decode after encode gives the same
 -- message. Every codec must satisfy this property.
@@ -319,9 +307,9 @@ prop_codecM
      , Eq (AnyMessage ps)
      )
   => Codec ps failure m bytes
-  -> AnyMessageAndAgency ps
+  -> AnyMessage ps
   -> m Bool
-prop_codecM Codec {encode, decode} (AnyMessageAndAgency (msg :: Message ps st st')) = do
+prop_codecM Codec {encode, decode} (AnyMessage (msg :: Message ps st st')) = do
     r <- decode >>= runDecoder [encode msg]
     case r :: Either failure (SomeMessage st) of
       Right (SomeMessage msg') -> return $ AnyMessage msg' == AnyMessage msg
@@ -334,7 +322,7 @@ prop_codec
      (Monad m, Eq (AnyMessage ps))
   => (forall a. m a -> a)
   -> Codec ps failure m bytes
-  -> AnyMessageAndAgency ps
+  -> AnyMessage ps
   -> Bool
 prop_codec runM codec msg =
     runM (prop_codecM codec msg)
@@ -356,10 +344,10 @@ prop_codec_splitsM
      (Monad m, Eq (AnyMessage ps))
   => (bytes -> [[bytes]])   -- ^ alternative re-chunkings of serialised form
   -> Codec ps failure m bytes
-  -> AnyMessageAndAgency ps
+  -> AnyMessage ps
   -> m Bool
 prop_codec_splitsM splits
-                   Codec {encode, decode} (AnyMessageAndAgency (msg :: Message ps st st')) = do
+                   Codec {encode, decode} (AnyMessage (msg :: Message ps st st')) = do
     and <$> sequence
       [ do r <- decode >>= runDecoder bytes'
            case r :: Either failure (SomeMessage st) of
@@ -378,7 +366,7 @@ prop_codec_splits
   => (bytes -> [[bytes]])
   -> (forall a. m a -> a)
   -> Codec ps failure m bytes
-  -> AnyMessageAndAgency ps
+  -> AnyMessage ps
   -> Bool
 prop_codec_splits splits runM codec msg =
     runM $ prop_codec_splitsM splits codec msg
@@ -418,11 +406,11 @@ prop_codec_binary_compatM
   -> Codec psB failure m bytes
   -> (forall pr (stA :: psA). Sing stA -> SamePeerHasAgency pr psB)
      -- ^ The states of A map directly of states of B.
-  -> AnyMessageAndAgency psA
+  -> AnyMessage psA
   -> m Bool
 prop_codec_binary_compatM
     codecA codecB stokEq
-    (AnyMessageAndAgency (msgA :: Message psA stA stA')) =
+    (AnyMessage (msgA :: Message psA stA stA')) =
   let stokA :: Sing stA
       stokA = sing
   in case stokEq stokA of
@@ -452,7 +440,7 @@ prop_codec_binary_compat
   -> Codec psA failure m bytes
   -> Codec psB failure m bytes
   -> (forall pr (stA :: psA). Sing stA -> SamePeerHasAgency pr psB)
-  -> AnyMessageAndAgency psA
+  -> AnyMessage psA
   -> Bool
 prop_codec_binary_compat runM codecA codecB stokEq msgA =
      runM $ prop_codec_binary_compatM codecA codecB stokEq msgA
@@ -470,10 +458,10 @@ prop_codecs_compatM
      )
   => Codec ps failure m bytes
   -> Codec ps failure m bytes
-  -> AnyMessageAndAgency ps
+  -> AnyMessage ps
   -> m Bool
 prop_codecs_compatM codecA codecB
-                    (AnyMessageAndAgency (msg :: Message ps st st')) =
+                    (AnyMessage (msg :: Message ps st st')) =
     getAll <$> do r <- decode codecB >>= runDecoder [encode codecA msg]
                   case r :: Either failure (SomeMessage st) of
                     Right (SomeMessage msg') -> return $ All $ AnyMessage msg' == AnyMessage msg
@@ -494,7 +482,7 @@ prop_codecs_compat
   => (forall a. m a -> a)
   -> Codec ps failure m bytes
   -> Codec ps failure m bytes
-  -> AnyMessageAndAgency ps
+  -> AnyMessage ps
   -> Bool
 prop_codecs_compat run codecA codecB msg =
     run $ prop_codecs_compatM codecA codecB msg
