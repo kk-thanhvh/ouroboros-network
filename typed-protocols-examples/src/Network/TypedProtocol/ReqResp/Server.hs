@@ -25,7 +25,7 @@ data ReqRespServer req resp m a = ReqRespServer {
 reqRespServerPeer
   :: Monad m
   => ReqRespServer req resp m a
-  -> Peer (ReqResp req resp) AsServer StIdle m a
+  -> Peer (ReqResp req resp) AsServer NonPipelined Empty StIdle m a
 reqRespServerPeer ReqRespServer{..} =
 
     -- In the 'StIdle' the server is awaiting a request message

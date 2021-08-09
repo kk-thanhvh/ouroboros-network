@@ -18,16 +18,12 @@ module Network.TypedProtocol.Driver.Simple (
   -- * Introduction
   -- $intro
 
-  -- * Normal peers
+  -- * Run peers
   runPeer,
   TraceSendRecv(..),
 
-  -- * Pipelined peers
-  runPipelinedPeer,
-
   -- * Connected peers
   runConnectedPeers,
-  runConnectedPeersPipelined,
 
   -- * Driver utilities
   -- | This may be useful if you want to write your own driver.
@@ -38,7 +34,6 @@ module Network.TypedProtocol.Driver.Simple (
 import Data.Singletons
 
 import Network.TypedProtocol.Core
-import Network.TypedProtocol.Pipelined
 import Network.TypedProtocol.Driver
 import Network.TypedProtocol.Channel
 import Network.TypedProtocol.Codec
@@ -85,6 +80,7 @@ instance Show (AnyMessage ps) => Show (TraceSendRecv ps) where
   show (TraceRecvMsg msg) = "Recv " ++ show msg
 
 
+-- TODO: implement 'tryRecvMessage'
 driverSimple :: forall ps (pr :: PeerRole) failure bytes m.
                 (MonadThrow m, Exception failure)
              => Tracer m (TraceSendRecv ps)
@@ -92,13 +88,13 @@ driverSimple :: forall ps (pr :: PeerRole) failure bytes m.
              -> Channel m bytes
              -> Driver ps pr (Maybe bytes) m
 driverSimple tracer Codec{encode, decode} channel@Channel{send} =
-    Driver { sendMessage, recvMessage, startDState = Nothing }
+    Driver { sendMessage, recvMessage, tryRecvMessage, startDState = Nothing }
   where
     sendMessage :: forall (st :: ps) (st' :: ps).
                    SingI st
-                => (RelativeAgencyEq (StateAgency st)
-                                      WeHaveAgency
-                                     (Relative pr (StateAgency st)))
+                => (ReflRelativeAgency (StateAgency st)
+                                        WeHaveAgency
+                                       (Relative pr (StateAgency st)))
                 -> Message ps st st'
                 -> m ()
     sendMessage _ msg = do
@@ -107,9 +103,9 @@ driverSimple tracer Codec{encode, decode} channel@Channel{send} =
 
     recvMessage :: forall (st :: ps).
                    SingI st
-                => (RelativeAgencyEq (StateAgency st)
-                                      TheyHaveAgency
-                                     (Relative pr (StateAgency st)))
+                => (ReflRelativeAgency (StateAgency st)
+                                        TheyHaveAgency
+                                       (Relative pr (StateAgency st)))
                 -> Maybe bytes
                 -> m (SomeMessage st, Maybe bytes)
     recvMessage _ trailing = do
@@ -122,42 +118,29 @@ driverSimple tracer Codec{encode, decode} channel@Channel{send} =
         Left failure ->
           throwIO failure
 
+    tryRecvMessage :: forall (st :: ps).
+                      (ReflRelativeAgency (StateAgency st)
+                                           TheyHaveAgency
+                                          (Relative pr (StateAgency st)))
+                   -> Maybe bytes
+                   -> m (Maybe (SomeMessage st, Maybe bytes))
+    -- TODO
+    tryRecvMessage _ _ = return Nothing
 
 -- | Run a peer with the given channel via the given codec.
 --
 -- This runs the peer to completion (if the protocol allows for termination).
 --
 runPeer
-  :: forall ps (st :: ps) pr failure bytes m a .
+  :: forall ps (st :: ps) pr pl q failure bytes m a .
      (MonadThrow m, Exception failure)
   => Tracer m (TraceSendRecv ps)
   -> Codec ps failure m bytes
   -> Channel m bytes
-  -> Peer ps pr st m a
+  -> Peer ps pr pl q st m a
   -> m a
 runPeer tracer codec channel peer =
     fst <$> runPeerWithDriver driver peer (startDState driver)
-  where
-    driver = driverSimple tracer codec channel
-
-
--- | Run a pipelined peer with the given channel via the given codec.
---
--- This runs the peer to completion (if the protocol allows for termination).
---
--- Unlike normal peers, running pipelined peers rely on concurrency, hence the
--- 'MonadSTM' constraint.
---
-runPipelinedPeer
-  :: forall ps (st :: ps) pr failure bytes m a.
-     (MonadSTM m, MonadAsync m, MonadThrow m, Exception failure)
-  => Tracer m (TraceSendRecv ps)
-  -> Codec ps failure m bytes
-  -> Channel m bytes
-  -> PeerPipelined ps pr st m a
-  -> m a
-runPipelinedPeer tracer codec channel peer =
-    fst <$> runPipelinedPeerWithDriver driver peer (startDState driver)
   where
     driver = driverSimple tracer codec channel
 
@@ -195,8 +178,8 @@ runConnectedPeers :: (MonadSTM m, MonadAsync m, MonadCatch m,
                   => m (Channel m bytes, Channel m bytes)
                   -> Tracer m (PeerRole, TraceSendRecv ps)
                   -> Codec ps failure m bytes
-                  -> Peer ps pr st m a
-                  -> Peer ps (FlipAgency pr) st m b
+                  -> Peer ps             pr  pl q st m a
+                  -> Peer ps (FlipAgency pr) pl q st m b
                   -> m (a, b)
 runConnectedPeers createChannels tracer codec client server =
     createChannels >>= \(clientChannel, serverChannel) ->
@@ -207,22 +190,3 @@ runConnectedPeers createChannels tracer codec client server =
   where
     tracerClient = contramap ((,) AsClient) tracer
     tracerServer = contramap ((,) AsServer) tracer
-
-runConnectedPeersPipelined :: (MonadSTM m, MonadAsync m, MonadCatch m,
-                               Exception failure)
-                           => m (Channel m bytes, Channel m bytes)
-                           -> Tracer m (PeerRole, TraceSendRecv ps)
-                           -> Codec ps failure m bytes
-                           -> PeerPipelined ps pr st m a
-                           -> Peer          ps (FlipAgency pr) st m b
-                           -> m (a, b)
-runConnectedPeersPipelined createChannels tracer codec client server =
-    createChannels >>= \(clientChannel, serverChannel) ->
-
-    runPipelinedPeer tracerClient codec clientChannel client
-      `concurrently`
-    runPeer          tracerServer codec serverChannel server
-  where
-    tracerClient = contramap ((,) AsClient) tracer
-    tracerServer = contramap ((,) AsServer) tracer
-

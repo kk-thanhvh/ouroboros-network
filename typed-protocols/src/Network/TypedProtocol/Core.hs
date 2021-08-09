@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE EmptyCase #-}
@@ -30,27 +31,32 @@ module Network.TypedProtocol.Core (
   -- * Engaging in protocols
   -- $using
   PeerRole(..),
-  TokPeerRole(..),
+  SingPeerRole(..),
   Agency(..),
   RelativeAgency(..),
   Relative,
-  RelativeAgencyEq(..),
+  ReflRelativeAgency(..),
   FlipAgency,
+  Pipelined (..),
+  Trans(..),
+  SingTrans(..),
+  Queue(..),
+  type (<|),
+  type (|>),
+  SingQueue(..),
+  (|>),
   Peer(..),
 
   -- * Protocol proofs and tests
   -- $tests
   -- $lemmas
-  exclusionLemmaClientAndServerHaveAgency_1,
-  exclusionLemmaClientAndServerHaveAgency_2,
-  exclusionLemmaWeHaveAgencyAndNobodyHasAgency_1,
-  exclusionLemmaWeHaveAgencyAndNobodyHasAgency_2,
-  exclusionLemmaTheyHaveAgencyAndNobodyHasAgency_1,
-  exclusionLemmaTheyHaveAgencyAndNobodyHasAgency_2,
+  exclusionLemma_ClientAndServerHaveAgency,
+  terminationLemma_1,
+  terminationLemma_2,
+  ReflNobodyHasAgency(..),
   ) where
 
 import Data.Kind (Type)
-import Data.Void (Void)
 
 import Data.Singletons
 
@@ -201,10 +207,16 @@ import Data.Singletons
 --
 data PeerRole = AsClient | AsServer
 
-type TokPeerRole :: PeerRole -> Type
-data TokPeerRole pr where
-    TokAsClient :: TokPeerRole AsClient
-    TokAsServer :: TokPeerRole AsServer
+type SingPeerRole :: PeerRole -> Type
+data SingPeerRole pr where
+    SingAsClient :: SingPeerRole AsClient
+    SingAsServer :: SingPeerRole AsServer
+
+type instance Sing = SingPeerRole
+instance SingI AsClient where
+    sing = SingAsClient
+instance SingI AsServer where
+    sing = SingAsServer
 
 data Agency where
     ClientAgency :: Agency
@@ -232,11 +244,11 @@ type family Relative  pr a where
 -- agency.  It is isomorphic to a product of 'Agency' singleton and
 -- @'RelativeAgency' :~: 'RelativeAgency'@.
 --
-type RelativeAgencyEq :: Agency -> RelativeAgency -> RelativeAgency -> Type
-data RelativeAgencyEq a r r' where
-    ReflClientAgency :: RelativeAgencyEq ClientAgency r r
-    ReflServerAgency :: RelativeAgencyEq ServerAgency r r
-    ReflNobodyAgency :: RelativeAgencyEq NobodyAgency r r
+type ReflRelativeAgency :: Agency -> RelativeAgency -> RelativeAgency -> Type
+data ReflRelativeAgency a r r' where
+    ReflClientAgency :: ReflRelativeAgency ClientAgency r r
+    ReflServerAgency :: ReflRelativeAgency ServerAgency r r
+    ReflNobodyAgency :: ReflRelativeAgency NobodyAgency r r
 
 
 -- $lemmas
@@ -290,24 +302,17 @@ data RelativeAgencyEq a r r' where
 -- >     type StateAgency StBusy = ServerAgency
 -- >     type StateAgency StDone = NobodyAgency
 --
--- The framework provides a proof that if the client has agency for a state then there
--- are no cases in which the server has agency, see
+-- The framework provides proofs which excludes that the client and server have
+-- agency at the same time.
 --
--- * 'exclusionLemmaClientAndServerHaveAgency_1'.
--- * 'exclusionLemmaClientAndServerHaveAgency_2'.
+-- * 'exclusionLemma_ClientAndServerHaveAgency',
+-- * 'terminationLemma_1',
+-- * 'terminationLemma_2'.
 --
--- For this protocol there is only one state in which the client has agency,
--- the idle state. By pattern matching on the state token for the server
--- agency we can list all the cases in which the server also has agency for
--- the idle state. There are of course none of these so we give the empty
--- set of patterns. GHC can check that we are indeed correct about this.
--- This also requires the @EmptyCase@ language extension.
---
--- To get this completeness checking it is important to compile modules
--- containing these lemmas with @-Wincomplete-patterns@, which is implied by
--- @-Wall@.
---
--- All three lemmas follow the same pattern.
+-- These lemmas are proven for all protocols.  These proofs relay on
+-- @EmptyCase@ extension.  To get this completeness checking it is important to
+-- compile modules containing these lemmas with @-Wincomplete-patterns@, which
+-- is implied by @-Wall@.
 --
 
 -- | The protocol type class bundles up all the requirements for a typed
@@ -322,13 +327,11 @@ data RelativeAgencyEq a r r' where
 --   agency, or the server has agency, or neither have agency.
 --
 -- The labelling of each protocol state with the peer that has agency in that
--- state is done by giving a definition to the data families 
--- 'ClientHasAgency', 'ServerHasAgency' and 'NobodyHasAgency'. These
--- definitions are expected to be singleton-style GADTs with one constructor
--- per protocol state.
---
--- Each protocol state must be assigned to only one label. See
--- "Network.TypedProtocol.Proofs" for more details on this point.
+-- state is done by giving a definition to the type family
+-- 'StateAgency'.  It is required provide 'Sing' type family instance as well
+-- as 'SingI' instances for all protocol states.  These singletons allow one to
+-- pattern match on the state, which is useful when defining codecs, or
+-- providing informative error messages.
 --
 class Protocol ps where
 
@@ -352,118 +355,164 @@ type family FlipAgency pr where
   FlipAgency AsServer = AsClient
 
 
+-- | An evidence that both relative agencies are equal to 'NobodyHasAgency'.
 --
--- Auxiliary lemmas; They are only used to show that out of 6 exclusion lemmas,
--- only 3 of them are independent.
+type ReflNobodyHasAgency :: RelativeAgency -> RelativeAgency -> Type
+data ReflNobodyHasAgency ra ra' where
+     ReflNobodyHasAgency :: ReflNobodyHasAgency
+                                NobodyHasAgency
+                                NobodyHasAgency
+
+
+-- | A proof that if both @Relative pr a@ and @Relative (FlipAgency pr) a@ are
+-- equal then nobody has agency.  In particual this lemma excludes the
+-- possibility that client and server has agency at the same state.
 --
-
-lemma_flipAgency_1 :: TokPeerRole pr
-                   -> RelativeAgencyEq a TheyHaveAgency (Relative             pr  a)
-                   -> RelativeAgencyEq a WeHaveAgency   (Relative (FlipAgency pr) a)
-lemma_flipAgency_1 TokAsClient ReflServerAgency = ReflServerAgency
-lemma_flipAgency_1 TokAsServer ReflClientAgency = ReflClientAgency
-
-lemma_flipAgency_2 :: TokPeerRole pr
-                   -> RelativeAgencyEq a TheyHaveAgency (Relative (FlipAgency pr) a)
-                   -> RelativeAgencyEq a WeHaveAgency   (Relative             pr  a)
-lemma_flipAgency_2 TokAsClient ReflClientAgency = ReflClientAgency
-lemma_flipAgency_2 TokAsServer ReflServerAgency = ReflServerAgency
-
-lemma_flipAgency_3 :: TokPeerRole pr
-                   -> RelativeAgencyEq a NobodyHasAgency (Relative             pr  a)
-                   -> RelativeAgencyEq a NobodyHasAgency (Relative (FlipAgency pr) a)
-lemma_flipAgency_3 TokAsClient ReflNobodyAgency = ReflNobodyAgency
-lemma_flipAgency_3 TokAsServer ReflNobodyAgency = ReflNobodyAgency
-
-lemma_flipAgency_4 :: TokPeerRole pr
-                   -> RelativeAgencyEq a NobodyHasAgency (Relative (FlipAgency pr) a)
-                   -> RelativeAgencyEq a NobodyHasAgency (Relative             pr  a)
-lemma_flipAgency_4 TokAsClient ReflNobodyAgency = ReflNobodyAgency
-lemma_flipAgency_4 TokAsServer ReflNobodyAgency = ReflNobodyAgency
+exclusionLemma_ClientAndServerHaveAgency
+  :: forall (pr :: PeerRole) (a :: Agency)
+            (ra  :: RelativeAgency).
+     SingPeerRole pr
+  -> ReflRelativeAgency a ra (Relative             pr  a)
+  -> ReflRelativeAgency a ra (Relative (FlipAgency pr) a)
+  -> ReflNobodyHasAgency     (Relative             pr  a)
+                             (Relative (FlipAgency pr) a)
+exclusionLemma_ClientAndServerHaveAgency
+  SingAsClient ReflNobodyAgency ReflNobodyAgency = ReflNobodyHasAgency
+exclusionLemma_ClientAndServerHaveAgency
+  SingAsServer ReflNobodyAgency ReflNobodyAgency = ReflNobodyHasAgency
 
 
-
-exclusionLemmaClientAndServerHaveAgency_1
-  :: forall (pr :: PeerRole) (a :: Agency).
-     TokPeerRole pr
-  -> RelativeAgencyEq a WeHaveAgency (Relative             pr  a)
-  -> RelativeAgencyEq a WeHaveAgency (Relative (FlipAgency pr) a)
-  -> Void
-exclusionLemmaClientAndServerHaveAgency_1
-  TokAsClient
-  ReflClientAgency refl =
-    case refl of {}
-
-
--- | 'exclusionLemmaClientAndServerHaveAgency_2' which is a consequence of
--- 'exclusionLemmaClientAndServerHaveAgency_1' (and vice versa).  It also could
--- be proven directly by pattern matching on 'TokAsClient' and
--- 'ReflServerAgency' and conclusing that the last argument is an empty case.
+-- | A proof that if one side has terminated, then the other side terminated as
+-- well.
 --
-exclusionLemmaClientAndServerHaveAgency_2
-  :: TokPeerRole pr
-  -> RelativeAgencyEq a TheyHaveAgency (Relative             pr  a)
-  -> RelativeAgencyEq a TheyHaveAgency (Relative (FlipAgency pr) a)
-  -> Void
-exclusionLemmaClientAndServerHaveAgency_2
-  TokAsClient
-  refl refl' =
-    exclusionLemmaClientAndServerHaveAgency_1 TokAsClient
-      (lemma_flipAgency_1 TokAsServer refl')
-      (lemma_flipAgency_1 TokAsClient refl)
+terminationLemma_1
+  :: SingPeerRole pr
+  -> ReflRelativeAgency a ra              (Relative             pr  a)
+  -> ReflRelativeAgency a NobodyHasAgency (Relative (FlipAgency pr) a)
+  -> ReflNobodyHasAgency                  (Relative             pr  a)
+                                          (Relative (FlipAgency pr) a)
+terminationLemma_1
+  SingAsClient ReflNobodyAgency ReflNobodyAgency = ReflNobodyHasAgency
+terminationLemma_1
+  SingAsServer ReflNobodyAgency ReflNobodyAgency = ReflNobodyHasAgency
 
 
-exclusionLemmaWeHaveAgencyAndNobodyHasAgency_1
-  :: TokPeerRole pr
-  -> RelativeAgencyEq a WeHaveAgency    (Relative             pr  a)
-  -> RelativeAgencyEq a NobodyHasAgency (Relative (FlipAgency pr) a)
-  -> Void
-exclusionLemmaWeHaveAgencyAndNobodyHasAgency_1
-  TokAsClient
-  ReflClientAgency refl =
-    case refl of {}
-
-
-exclusionLemmaWeHaveAgencyAndNobodyHasAgency_2
-  :: TokPeerRole pr
-  -> RelativeAgencyEq a WeHaveAgency    (Relative (FlipAgency pr) a)
-  -> RelativeAgencyEq a NobodyHasAgency (Relative             pr  a)
-  -> Void
-exclusionLemmaWeHaveAgencyAndNobodyHasAgency_2
-  TokAsServer
-  ReflClientAgency refl =
-    case refl of {}
-
-
--- | 'exclusionLemmaTheyHaveAgencyAndNobodyHasAgency_1' is a consequence of
--- 'exclusionLemmaWeHaveAgencyAndNobodyHasAgency_2'.
+-- | Internal; only need to formulate auxiliary lemmas in the proof of
+-- 'terminationLemma_2'.
 --
-exclusionLemmaTheyHaveAgencyAndNobodyHasAgency_1
-  :: TokPeerRole pr
-  -> RelativeAgencyEq a TheyHaveAgency  (Relative             pr  a)
-  -> RelativeAgencyEq a NobodyHasAgency (Relative (FlipAgency pr) a)
-  -> Void
-exclusionLemmaTheyHaveAgencyAndNobodyHasAgency_1
-  TokAsClient
-  refl refl' =
-    exclusionLemmaWeHaveAgencyAndNobodyHasAgency_2 TokAsClient
-                                                  (lemma_flipAgency_1 TokAsClient refl)
-                                                  (lemma_flipAgency_4 TokAsClient refl')
+type        FlipRelAgency :: RelativeAgency -> RelativeAgency
+type family FlipRelAgency ra where
+  FlipRelAgency WeHaveAgency    = TheyHaveAgency
+  FlipRelAgency TheyHaveAgency  = WeHaveAgency
+  FlipRelAgency NobodyHasAgency = NobodyHasAgency
 
--- | 'exclusionLemmaTheyHaveAgencyAndNobodyHasAgency_2' is a consequence of
--- 'exclusionLemmaWeHaveAgencyAndNobodyHasAgency_1'.
+
+-- | Similar to 'terminationLemma_1'.
 --
-exclusionLemmaTheyHaveAgencyAndNobodyHasAgency_2
-  :: TokPeerRole pr
-  -> RelativeAgencyEq a TheyHaveAgency  (Relative (FlipAgency pr) a)
-  -> RelativeAgencyEq a NobodyHasAgency (Relative             pr  a)
-  -> Void
-exclusionLemmaTheyHaveAgencyAndNobodyHasAgency_2
-  TokAsServer
-  refl refl' =
-    exclusionLemmaWeHaveAgencyAndNobodyHasAgency_1 TokAsServer
-                                                  (lemma_flipAgency_2 TokAsServer refl)
-                                                  (lemma_flipAgency_3 TokAsServer refl')
+-- Note: this could be proven in the same way 'terminationLemma_1' is proved,
+-- but instead we use two lemmas to reduce the assumptions (arguments) and
+-- we apply 'terminationLemma_1'.
+--
+terminationLemma_2
+  :: SingPeerRole pr
+  -> ReflRelativeAgency a ra              (Relative (FlipAgency pr) a)
+  -> ReflRelativeAgency a NobodyHasAgency (Relative             pr  a)
+  -> ReflNobodyHasAgency                  (Relative (FlipAgency pr) a)
+                                          (Relative             pr  a)
+                        
+terminationLemma_2 singPeerRole refl refl' =
+    case terminationLemma_1 singPeerRole
+                       (lemma_flip  singPeerRole refl)
+                       (lemma_flip' singPeerRole refl')
+    of x@ReflNobodyHasAgency -> x
+    -- note: if we'd swap arguments of the returned @ReflNobodyHasAgency@ type,
+    -- we wouldn't need to pattern match on the result.  But in this form the
+    -- lemma is a symmetric version of 'terminationLemma_1'.
+  where
+    lemma_flip
+      :: SingPeerRole pr
+      -> ReflRelativeAgency a                ra  (Relative (FlipAgency pr) a)
+      -> ReflRelativeAgency a (FlipRelAgency ra) (Relative             pr  a)
+
+    lemma_flip'
+      :: SingPeerRole pr
+      -> ReflRelativeAgency a                ra  (Relative             pr  a)
+      -> ReflRelativeAgency a (FlipRelAgency ra) (Relative (FlipAgency pr) a)
+
+    -- both lemmas are identity functions:
+    lemma_flip  SingAsClient ReflClientAgency = ReflClientAgency
+    lemma_flip  SingAsClient ReflServerAgency = ReflServerAgency
+    lemma_flip  SingAsClient ReflNobodyAgency = ReflNobodyAgency
+    lemma_flip  SingAsServer ReflClientAgency = ReflClientAgency
+    lemma_flip  SingAsServer ReflServerAgency = ReflServerAgency
+    lemma_flip  SingAsServer ReflNobodyAgency = ReflNobodyAgency
+
+    lemma_flip' SingAsClient ReflClientAgency = ReflClientAgency
+    lemma_flip' SingAsClient ReflServerAgency = ReflServerAgency
+    lemma_flip' SingAsClient ReflNobodyAgency = ReflNobodyAgency
+    lemma_flip' SingAsServer ReflClientAgency = ReflClientAgency
+    lemma_flip' SingAsServer ReflServerAgency = ReflServerAgency
+    lemma_flip' SingAsServer ReflNobodyAgency = ReflNobodyAgency
+
+
+-- | Transition kind.
+--
+data Trans ps where
+    Tr :: forall ps. ps -> ps -> Trans ps
+
+
+-- | Singleton for @'Trans' ps@ kind.
+--
+type SingTrans :: Trans ps -> Type
+data SingTrans tr where
+    SingTr :: forall ps (st :: ps) (st' :: ps).
+              SingTrans (Tr st st')
+
+-- | Queue kind.  The type level queue is used to push pipelined transitions
+-- and pop them from its other side when one is requesting to collect pipelined
+-- results.
+--
+data Queue ps where
+  Empty :: Queue ps
+  Cons  :: Trans ps -> Queue ps -> Queue ps
+
+-- | Cons type alias
+--
+type  (<|) :: Trans ps -> Queue ps -> Queue ps
+type a <| as = Cons a as
+infixr 5 <|
+
+-- | Snoc operator
+--
+type (|>) :: Queue ps -> Trans ps -> Queue ps
+type family as |> b where
+     Empty     |> b = Cons b Empty
+     (a <| as) |> b = a <| (as |> b)
+infixr 5 |>
+
+-- | Singleton data type which allows to track the types of kind
+-- @'Queue' ps@.
+--
+type SingQueue :: Queue ps -> Type
+data SingQueue q where
+    SingEmpty :: SingQueue Empty
+    SingCons  :: forall ps (st :: ps) (st' :: ps) (q :: Queue ps).
+                 SingQueue q
+              -> SingQueue (Tr st st' <| q)
+
+-- | Term level '|>' (snoc).
+--
+(|>) :: forall ps (st :: ps) (st' :: ps) (q :: Queue ps).
+        SingQueue q
+     -> SingTrans (Tr st st')
+     -> SingQueue (q |> Tr st st')
+(|>)  SingEmpty   !_   = SingCons SingEmpty
+(|>) (SingCons q) !str = SingCons (q |> str)
+
+-- | Promoted data type which indicates if 'Peer' is used in
+-- pipelined mode or not.
+--
+data Pipelined = NonPipelined | Pipelined
 
 
 -- | A description of a peer that engages in a protocol.
@@ -497,16 +546,25 @@ exclusionLemmaTheyHaveAgencyAndNobodyHasAgency_2
 -- * to wait to receive a message (but only in a protocol state in which the
 --   other peer has agency)
 --
--- In the 'Done', 'Yield' and 'Await' cases we must provide evidence that the
--- appropriate peer has agency.  This takes the form of 'ReflClientAgency' or
--- 'ReflServerAgency'. The 'Done' state does need an extra state token, which is
--- only needed to provide an evidence that the protocol terminates at one of its
--- terminal states, see 'connect'.
+-- The 'Yield', 'Await' and 'Done' constructors require to provide an evidence
+-- that the appropriate peer has agency.  This information is suplied using
+-- one of the constructors of 'ReflRelativeAgency'.
 --
 -- While this evidence must be provided, the types guarantee that it is not
--- possible to supply incorrect evidence.
+-- possible to supply incorrect evidence.  The
+-- 'Network.TypedProtocol.Peer.Client' or 'Network.TypedProtocol.Peer.Server'
+-- pattern synonyms provide this evidence automatically.
 --
-data Peer ps (pr :: PeerRole) (st :: ps) m a where
+type Peer :: forall ps
+          -> PeerRole
+          -> Pipelined
+          -> Queue ps
+          -> ps
+          -> (Type -> Type)
+          -- ^ monad's kind
+          -> Type
+          -> Type
+data Peer ps pr pl q st m a where
 
   -- | Perform a local monadic effect and then continue.
   --
@@ -516,25 +574,10 @@ data Peer ps (pr :: PeerRole) (st :: ps) m a where
   -- >   ...          -- actions in the monad
   -- >   return $ ... -- another Peer value
   --
-  Effect :: m (Peer ps pr st m a)
-         ->    Peer ps pr st m a
-
-  -- | Terminate with a result. A state token must be provided from the
-  -- 'NobodyHasAgency' states, so show that this is a state in which we can
-  -- terminate.
-  --
-  -- Example:
-  --
-  -- > Yield ReflClientAgency
-  -- >        MsgDone
-  -- >       (Done ReflNobodyAgency TokDone result)
-  --
-  Done   :: SingI st
-         => (RelativeAgencyEq (StateAgency st)
-                               NobodyHasAgency
-                              (Relative pr (StateAgency st)))
-         -> a
-         -> Peer ps pr st m a
+  Effect
+    :: m (Peer ps pr pl q st m a)
+    -- ^ monadic continuation
+    ->    Peer ps pr pl q st m a
 
   -- | Send a message to the other peer and then continue. This takes the
   -- message and the continuation. It also requires evidence that we have
@@ -544,13 +587,17 @@ data Peer ps (pr :: PeerRole) (st :: ps) m a where
   --
   -- > Yield ReflClientAgency MsgPing $ ...
   --
-  Yield  :: SingI st
-         => (RelativeAgencyEq (StateAgency st)
-                               WeHaveAgency
-                              (Relative pr (StateAgency st)))
-         -> Message ps st st'
-         -> Peer ps pr st' m a
-         -> Peer ps pr st  m a
+  Yield
+    :: SingI st
+    => (ReflRelativeAgency (StateAgency st)
+                            WeHaveAgency
+                           (Relative pr (StateAgency st)))
+    -- ^ agency singleton
+    -> Message ps st st'
+    -- ^ protocol message
+    -> Peer ps pr pl Empty st' m a
+    -- ^ continuation
+    -> Peer ps pr pl Empty st  m a
 
   -- | Waits to receive a message from the other peer and then continues.
   -- This takes the the continuation that is supplied with the received
@@ -569,12 +616,82 @@ data Peer ps (pr :: PeerRole) (st :: ps) m a where
   -- >   MsgDone -> ...
   -- >   MsgPing -> ...
   --
-  Await  :: SingI st 
-         => (RelativeAgencyEq (StateAgency st)
-                               TheyHaveAgency
-                              (Relative pr (StateAgency st)))
-         -> (forall st'. Message ps st st' -> Peer ps pr st' m a)
-         -> Peer ps pr st m a
+  Await
+    :: SingI st
+    => (ReflRelativeAgency (StateAgency st)
+                            TheyHaveAgency
+                           (Relative pr (StateAgency st)))
+    -- ^ agency singleton
+    -> (forall st'. Message ps st st'
+        -> Peer ps pr pl Empty st' m a)
+    -- ^ continuation
+    -> Peer     ps pr pl Empty st  m a
+
+  -- | Terminate with a result. A state token must be provided from the
+  -- 'NobodyHasAgency' states, so show that this is a state in which we can
+  -- terminate.
+  --
+  -- Example:
+  --
+  -- > Yield ReflClientAgency
+  -- >        MsgDone
+  -- >       (Done ReflNobodyAgency TokDone result)
+  --
+  Done
+    :: SingI st
+    => (ReflRelativeAgency (StateAgency st)
+                            NobodyHasAgency
+                           (Relative pr (StateAgency st)))
+    -- ^ (no) agency singleton
+    -> a
+    -- ^ returned value
+    -> Peer ps pr pl Empty st m a
+
+  --
+  -- Pipelining primitives
+  --
+
+  -- | Pipelined send which. Note that the continuation decides from which
+  -- state we pipeline next message, and the gap is pushed at the back of
+  -- the queue.
+  --
+  YieldPipelined
+    :: (SingI st, SingI st')
+    => (ReflRelativeAgency (StateAgency st)
+                            WeHaveAgency
+                           (Relative pr (StateAgency st)))
+    -- ^ agency singleton
+    -> Message ps st st'
+    -- ^ protocol message
+    -> Peer ps pr 'Pipelined (q |> Tr st' st'') st'' m a
+    -- ^ continuation
+    -> Peer ps pr 'Pipelined  q                 st   m a
+
+  -- | Partially collect promised transition.
+  --
+  Collect
+    :: (SingI st')
+    => (ReflRelativeAgency (StateAgency st')
+                            TheyHaveAgency
+                           (Relative pr (StateAgency st')))
+    -- ^ agency singleton
+    -> Maybe (Peer ps pr 'Pipelined (Tr st' st'' <| q) st m a)
+    -- ^ continuation, executed if no message has arrived so far
+    -> (forall stNext. Message ps st' stNext
+        -> Peer ps pr 'Pipelined (Tr stNext st'' <| q) st m a)
+    -- ^ continuation
+    -> Peer     ps pr 'Pipelined (Tr st'    st'' <| q) st m a
+
+  -- | Collect the identity transition.
+  --
+  -- 'CollectDone' allows to defer popping @Tr ps st st@ from the queue
+  -- after a message is received (in 'Collect' callback), unlike 'Collect'
+  -- which needs to know the transition type at compile time.
+  --
+  CollectDone
+    :: Peer ps pr 'Pipelined              q  st m a
+    -- ^ continuation
+    -> Peer ps pr 'Pipelined (Tr st st <| q) st m a
 
 
-deriving instance Functor m => Functor (Peer ps (pr :: PeerRole) (st :: ps) m)
+deriving instance Functor m => Functor (Peer ps (pr :: PeerRole) pl q (st :: ps) m)

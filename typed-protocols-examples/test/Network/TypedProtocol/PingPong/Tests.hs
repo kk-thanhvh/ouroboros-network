@@ -1,9 +1,12 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE StandaloneKindSignatures #-}
 
-
+-- orphaned arbitrary instances
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 module Network.TypedProtocol.PingPong.Tests
   ( tests
@@ -100,23 +103,25 @@ directPipelined :: Monad m
                 -> PingPongServer          m b
                 -> m (a, b)
 directPipelined (PingPongClientPipelined client0) server0 =
-    go EmptyQ client0 server0
+    go SingEmpty client0 server0
   where
     go :: Monad m
-       => Queue n c
-       -> PingPongSender n c m a
-       -> PingPongServer     m b
+       => SingQueue q
+       -> PingPongClientIdle q m a
+       -> PingPongServer       m b
        -> m (a, b)
-    go EmptyQ (SendMsgDonePipelined clientResult) PingPongServer{recvMsgDone} =
+    go SingEmpty (SendMsgDonePipelined clientResult) PingPongServer{recvMsgDone} =
       pure (clientResult, recvMsgDone)
 
-    go q (SendMsgPingPipelined kPong client') PingPongServer{recvMsgPing} = do
+    go q (SendMsgPingPipelined client') PingPongServer{recvMsgPing} = do
       server' <- recvMsgPing
-      x       <- kPong
-      go (enqueue x q) client' server'
+      let singTr :: SingTrans (Tr StBusy StIdle)
+          singTr = SingTr
+      go (q |> singTr) client' server'
 
-    go (ConsQ x q) (CollectPipelined _ k) server =
-      go q (k x) server
+    go (SingCons q) (CollectPipelined _ k) server = do
+      client' <- k
+      go q client' server
 
 
 -- | Run a simple ping\/pong client and server, without going via the 'Peer'
@@ -180,11 +185,13 @@ prop_connect :: NonNegative Int -> Bool
 prop_connect (NonNegative n) =
   case runIdentity
          (connect
-           TokAsClient
+           [] []
            (pingPongClientPeer (pingPongClientCount n))
            (pingPongServerPeer  pingPongServerCount))
 
-    of ((), n', TerminalStates SingDone ReflNobodyAgency ReflNobodyAgency) -> n == n'
+    of ((), n', TerminalStates SingDone ReflNobodyAgency
+                               SingDone ReflNobodyAgency) ->
+        n == n'
 
 
 --
@@ -200,11 +207,13 @@ connect_pipelined :: PingPongClientPipelined Identity [Either Int Int]
                   -> (Int, [Either Int Int])
 connect_pipelined client cs =
   case runIdentity
-         (connectPipelined TokAsClient cs
+         (connect cs []
             (pingPongClientPeerPipelined client)
             (pingPongServerPeer pingPongServerCount))
 
-    of (reqResps, n, TerminalStates SingDone ReflNobodyAgency ReflNobodyAgency) -> (n, reqResps)
+    of (reqResps, n, TerminalStates SingDone ReflNobodyAgency
+                                    SingDone ReflNobodyAgency) ->
+         (n, reqResps)
 
 
 -- | Using a client that forces maximum pipeling, show that irrespective of
