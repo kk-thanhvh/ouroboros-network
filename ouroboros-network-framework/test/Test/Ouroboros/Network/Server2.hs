@@ -25,8 +25,6 @@ module Test.Ouroboros.Network.Server2
   ( tests
   ) where
 
-
-import           Control.Applicative ((<|>))
 import           Control.Exception (AssertionFailed, SomeAsyncException (SomeAsyncException))
 import           Control.Monad (replicateM, when, (>=>))
 import           Control.Monad.Class.MonadAsync
@@ -46,12 +44,10 @@ import           Data.Bifoldable
 import           Data.Bifunctor
 import           Data.Bitraversable
 import           Data.ByteString.Lazy (ByteString)
-import           Data.Dynamic (fromDynamic)
 import qualified Data.ByteString.Lazy as LBS
 import           Data.Functor (void, ($>), (<&>))
-import           Data.List (dropWhileEnd, find, foldl', mapAccumL, intercalate, (\\), delete)
+import           Data.List (dropWhileEnd, find, mapAccumL, intercalate, (\\), delete, foldl')
 import           Data.List.NonEmpty (NonEmpty (..))
-import           Data.List.Octopus (Octopus (..))
 import qualified Data.List.Octopus as Octopus
 import qualified Data.Map.Strict as Map
 import           Data.Maybe (fromMaybe, fromJust, isJust)
@@ -120,15 +116,21 @@ tests =
   , testProperty "unidirectional_Sim" prop_unidirectional_Sim
   , testProperty "bidirectional_IO"   prop_bidirectional_IO
   , testProperty "bidirectional_Sim"  prop_bidirectional_Sim
-  , testProperty "multinode_pruning_Sim"
-                 prop_multinode_pruning_Sim
+  , testProperty "multinode_cm_pruning_Sim"
+                 prop_multinode_cm_pruning_Sim
+  , testProperty "multinode_ig_pruning_Sim"
+                 prop_multinode_ig_pruning_Sim
   , testProperty "hardlimit_Sim"
                  prop_hardlimit_Sim
-  , testProperty "multinode_Sim"      prop_multinode_Sim
+  , testProperty "multinode_cm_Sim"
+                 prop_multinode_cm_Sim
+  , testProperty "multinode_ig_Sim"
+                 prop_multinode_ig_Sim
   , testProperty "unit_connection_terminated_when_negotiating"
                  unit_connection_terminated_when_negotiating
   , testGroup "generators"
-    [ testProperty "MultiNodeScript"  prop_generator_MultiNodeScript
+    [ testProperty "MultiNodeScript"
+                   prop_generator_MultiNodeScript
     ]
   ]
 
@@ -1914,54 +1916,92 @@ data Three a b c
 
 -- | Property wrapping `multinodeExperiment`.
 --
--- Note: this test validates both connection manager and inbound governor state
--- changes.  'octoSplit' breaks streaming nature, this like causes performance
--- regression of this test.  This suggest we should:
+-- Note: this test validates connection manager state changes.
 --
--- TODO: split this test into two.
-prop_multinode_Sim :: Int -> ArbDataFlow -> AbsBearerInfo -> MultiNodeScript Int TestAddr -> Property
-prop_multinode_Sim serverAcc (ArbDataFlow dataFlow) absBi script@(MultiNodeScript l) =
-  let evs :: Octopus (Value ())
-                     (Three (RemoteTransitionTrace SimAddr)
-                            (AbstractTransitionTrace SimAddr)
-                            (InboundGovernorTrace SimAddr))
-      evs = fmap wnEvent
-          . Octopus.filter ((MainServer ==) . wnName)
-          . octoSelectTraceEvents
-              (\ev ->
-                case ev of
-                  EventLog dyn ->
-                        fmap First
-                        <$> fromDynamic
-                              @(WithName (Name SimAddr) (RemoteTransitionTrace   SimAddr))
-                              dyn
-                    <|> fmap Second
-                        <$> fromDynamic
-                              @(WithName (Name SimAddr) (AbstractTransitionTrace SimAddr))
-                              dyn
-                    <|> fmap Third
-                        <$> fromDynamic
-                              @(WithName (Name SimAddr) (InboundGovernorTrace SimAddr))
-                              dyn
-                  _ ->
-                       Nothing
-              )
-          $ runSimTrace sim
-      evs' :: [ConnectionManagerTrace SimAddr (ConnectionHandlerTrace UnversionedProtocol DataFlowProtocolData)]
-      evs' = fmap wnEvent
-           . filter ((MainServer ==) . wnName)
-           . selectTraceEventsDynamic
-               @()
-               @(WithName (Name SimAddr) (ConnectionManagerTrace SimAddr (ConnectionHandlerTrace UnversionedProtocol DataFlowProtocolData)))
-           $ runSimTrace sim
+prop_multinode_cm_Sim :: Int -> ArbDataFlow -> AbsBearerInfo -> MultiNodeScript Int TestAddr -> Property
+prop_multinode_cm_Sim serverAcc (ArbDataFlow dataFlow) absBi script@(MultiNodeScript l) =
+  let trace = runSimTrace sim
+
+      evsATT :: Octopus (Value ()) (AbstractTransitionTrace SimAddr)
+      evsATT = octopusWithNameTraceEvents trace
+
+      evsCMT :: [ConnectionManagerTrace
+                  SimAddr
+                  (ConnectionHandlerTrace
+                    UnversionedProtocol
+                    DataFlowProtocolData)]
+      evsCMT = withNameTraceEvents trace
+
   in tabulate "ConnectionEvents" (map showCEvs l)
     . counterexample (ppScript script)
-    . counterexample (ppOctopus show show evs)
-    . (\ ( tr1 :: Octopus (Value ()) (RemoteTransitionTrace   SimAddr)
-         , tr2 :: Octopus (Value ()) (AbstractTransitionTrace SimAddr)
-         , tr3 :: Octopus (Value ()) (InboundGovernorTrace    SimAddr)
+    . counterexample (ppOctopus show show evsATT)
+    . mkProperty
+    . bifoldMap
+       ( \ case
+           MainReturn {} -> mempty
+           v             -> mempty { tpProperty = counterexample (show v) False }
+       )
+       ( \ trs
+        -> TestProperty {
+             tpProperty =
+                 (counterexample $!
+                   (  "\nconnection:\n"
+                   ++ intercalate "\n" (map ppTransition trs))
+                   )
+               . getAllProperty
+               . foldMap ( \ tr
+                          -> AllProperty
+                           . (counterexample $!
+                               (  "\nUnexpected transition: "
+                               ++ show tr)
+                               )
+                           . verifyAbstractTransition
+                           $ tr
+                         )
+               $ trs,
+             tpNumberOfTransitions = Sum (length trs),
+             tpNumberOfConnections = Sum 1,
+             tpNumberOfPrunings    = classifyPrunings evsCMT,
+             tpNegotiatedDataFlows = [classifyNegotiatedDataFlow trs],
+             tpEffectiveDataFlows  = [classifyEffectiveDataFlow  trs],
+             tpTerminationTypes    = [classifyTermination        trs],
+             tpActivityTypes       = [classifyActivityType       trs],
+             tpTransitions         = trs
+          }
+       )
+    . splitConns
+    $ evsATT
+  where
+    sim :: IOSim s ()
+    sim = multiNodeSim serverAcc dataFlow
+                       (Script (toBearerInfo absBi :| [noAttenuation]))
+                       maxBound l
+
+
+-- | Property wrapping `multinodeExperiment`.
+--
+-- Note: this test validates inbound governor state changes.
+--
+prop_multinode_ig_Sim :: Int -> ArbDataFlow -> AbsBearerInfo -> MultiNodeScript Int TestAddr -> Property
+prop_multinode_ig_Sim serverAcc (ArbDataFlow dataFlow) absBi script@(MultiNodeScript l) =
+  let trace = runSimTrace sim
+
+      evsRTT :: Octopus (Value ()) (RemoteTransitionTrace SimAddr)
+      evsRTT = octopusWithNameTraceEvents trace
+
+      evsIGT :: Octopus (Value ()) (InboundGovernorTrace SimAddr)
+      evsIGT = octopusWithNameTraceEvents trace
+
+  in tabulate "ConnectionEvents" (map showCEvs l)
+    . counterexample (ppScript script)
+    . counterexample (ppOctopus show show evsRTT)
+    . counterexample (ppOctopus show show evsIGT)
+    . (\ ( tr1
+         , tr2
          )
        ->
+        -- Verify we do not return unsupported states in any of the
+        -- RemoteTransitionTrace
         ( getAllProperty
         . bifoldMap
             ( \ _ -> AllProperty (property True))
@@ -1985,148 +2025,126 @@ prop_multinode_Sim serverAcc (ArbDataFlow dataFlow) absBi script@(MultiNodeScrip
                 _     -> AllProperty (property True)
             )
 
-        $ tr3
+        $ tr2
         )
         .&&.
-        ( mkProperty
+        -- Verify that all Inbound Governor remote transitions are valid
+        ( getAllProperty
         . bifoldMap
-           ( \ case
-               MainReturn {} -> mempty
-               v             -> mempty { tpProperty = counterexample (show v) False }
+           ( \ _ -> AllProperty (property True) )
+           ( \ TransitionTrace {ttPeerAddr = peerAddr, ttTransition = tr} ->
+                 AllProperty
+               . counterexample (concat [ "Unexpected transition: "
+                                        , show peerAddr
+                                        , " "
+                                        , show tr
+                                        ])
+               . verifyRemoteTransition
+               $ tr
            )
-           ( \ trs
-            -> TestProperty {
-                 tpProperty =
-                     (counterexample $!
-                       (  "\nconnection:\n"
-                       ++ intercalate "\n" (map ppTransition trs))
-                       )
-                   . getAllProperty
-                   . foldMap ( \ tr
-                              -> AllProperty
-                               . (counterexample $!
-                                   (  "\nUnexpected transition: "
-                                   ++ show tr)
-                                   )
-                               . verifyAbstractTransition
-                               $ tr
-                             )
-                   $ trs,
-                 tpNumberOfTransitions = Sum (length trs),
-                 tpNumberOfConnections = Sum 1,
-                 tpNumberOfPrunings    = classifyPrunings evs',
-                 tpNegotiatedDataFlows = [classifyNegotiatedDataFlow trs],
-                 tpEffectiveDataFlows  = [classifyEffectiveDataFlow  trs],
-                 tpTerminationTypes    = [classifyTermination        trs],
-                 tpActivityTypes       = [classifyActivityType       trs],
-                 tpTransitions         = trs
-              }
-           )
-         . splitConns
-         $ tr2
-         )
-         .&&.
-         ( getAllProperty
-         . bifoldMap
-            ( \ _ -> AllProperty (property True) )
-            ( \ TransitionTrace {ttPeerAddr = peerAddr, ttTransition = tr} ->
-                  AllProperty
-                . counterexample (concat [ "Unexpected transition: "
-                                         , show peerAddr
-                                         , " "
-                                         , show tr
-                                         ])
-                . verifyRemoteTransition
-                $ tr
-            )
          $ tr1
          )
 
      )
-   . octoSplit
-   $ evs
+   $ (evsRTT, evsIGT)
   where
     sim :: IOSim s ()
-    sim = do
-      mb <- timeout 7200
-              ( withSnocket
-                  debugTracer
-                  -- We do this instead of generating a list of
-                  -- 'BearerInfo' where the last element is
-                  -- 'noAttenuation' because we need the last element
-                  -- to run to be 'noAttenuation' and not the last element
-                  -- of the list. The test is designed in this way so we
-                  -- can not do much about it. This is okay because the
-                  -- diffusion simulation will not need to relay on such an
-                  -- invariant; the outbound governor is the component which
-                  -- makes sure that a progress is made.
-                  (Script (toBearerInfo absBi :| [noAttenuation]))
-              $ \snocket ->
-                 multinodeExperiment (Tracer traceM)
-                                     (Tracer traceM)
-                                     (Tracer traceM)
-                                     (Tracer traceM)
-                                     snocket
-                                     Snocket.TestFamily
-                                     (Snocket.TestAddress 0)
-                                     serverAcc
-                                     dataFlow
-                                     maxBound
-                                     (unTestAddr <$> script)
-              )
-      case mb of
-        Nothing -> throwIO (SimulationTimeout :: ExperimentError SimAddr)
-        Just a  -> return a
+    sim = multiNodeSim serverAcc dataFlow
+                       (Script (toBearerInfo absBi :| [noAttenuation]))
+                       maxBound l
 
 -- | Property wrapping `multinodeExperiment` that has a generator optimized for triggering
 -- pruning, and random generated number of connections hard limit.
 --
 -- This test tests if with a higher chance of pruning happening and a smaller number of
--- connections hard limit we do not end up triggering any illegal transition.
+-- connections hard limit we do not end up triggering any illegal transition in Connection
+-- Manager.
 --
-prop_multinode_pruning_Sim :: Int -> MultiNodePruningScript Int -> Property
-prop_multinode_pruning_Sim serverAcc (MultiNodePruningScript (Small bound) l) =
-  let evs :: Octopus (Value ())
-                     (Three (RemoteTransitionTrace SimAddr)
-                            (AbstractTransitionTrace SimAddr)
-                            (InboundGovernorTrace SimAddr))
-      evs = fmap wnEvent
-          . Octopus.filter ((MainServer ==) . wnName)
-          . octoSelectTraceEvents
-              (\ev ->
-                case ev of
-                  EventLog dyn ->
-                        fmap First
-                        <$> fromDynamic
-                              @(WithName (Name SimAddr) (RemoteTransitionTrace   SimAddr))
-                              dyn
-                    <|> fmap Second
-                        <$> fromDynamic
-                              @(WithName (Name SimAddr) (AbstractTransitionTrace SimAddr))
-                              dyn
-                    <|> fmap Third
-                        <$> fromDynamic
-                              @(WithName (Name SimAddr) (InboundGovernorTrace SimAddr))
-                              dyn
-                  _ ->
-                       Nothing
-              )
-          $ runSimTrace sim
-      evs' :: [ConnectionManagerTrace SimAddr (ConnectionHandlerTrace UnversionedProtocol DataFlowProtocolData)]
-      evs' = fmap wnEvent
-           . filter ((MainServer ==) . wnName)
-           . selectTraceEventsDynamic
-               @()
-               @(WithName (Name SimAddr) (ConnectionManagerTrace SimAddr (ConnectionHandlerTrace UnversionedProtocol DataFlowProtocolData)))
-           $ runSimTrace sim
+prop_multinode_cm_pruning_Sim :: Int -> MultiNodePruningScript Int -> Property
+prop_multinode_cm_pruning_Sim serverAcc (MultiNodePruningScript (Small bound) l) =
+  let trace = runSimTrace sim
+
+      evsATT :: Octopus (Value ()) (AbstractTransitionTrace SimAddr)
+      evsATT = octopusWithNameTraceEvents trace
+
+      evsCMT :: [ConnectionManagerTrace
+                  SimAddr
+                  (ConnectionHandlerTrace
+                    UnversionedProtocol
+                    DataFlowProtocolData)]
+      evsCMT = withNameTraceEvents trace
+
   in tabulate "ConnectionEvents" (map showCEvs l)
     . counterexample (ppScript (MultiNodeScript l))
-    . counterexample (ppOctopus show show evs)
-    . (\ ( tr1 :: Octopus (Value ()) (RemoteTransitionTrace   SimAddr)
-         , tr2 :: Octopus (Value ()) (AbstractTransitionTrace SimAddr)
-         , tr3 :: Octopus (Value ()) (InboundGovernorTrace    SimAddr)
+    . counterexample (ppOctopus show show evsATT)
+    . mkPropertyPruning
+    . bifoldMap
+       ( \ case
+           MainReturn {} -> mempty
+           v             -> mempty { tpProperty = counterexample (show v) False }
+       )
+       ( \ trs
+        -> TestProperty {
+             tpProperty =
+                 (counterexample $!
+                   (  "\nconnection:\n"
+                   ++ intercalate "\n" (map ppTransition trs))
+                   )
+               . getAllProperty
+               . foldMap ( \ tr
+                          -> AllProperty
+                           . (counterexample $!
+                               (  "\nUnexpected transition: "
+                               ++ show tr)
+                               )
+                           . verifyAbstractTransition
+                           $ tr
+                         )
+               $ trs,
+             tpNumberOfTransitions = Sum (length trs),
+             tpNumberOfConnections = Sum 1,
+             tpNumberOfPrunings    = classifyPrunings evsCMT,
+             tpNegotiatedDataFlows = [classifyNegotiatedDataFlow trs],
+             tpEffectiveDataFlows  = [classifyEffectiveDataFlow  trs],
+             tpTerminationTypes    = [classifyTermination        trs],
+             tpActivityTypes       = [classifyActivityType       trs],
+             tpTransitions         = trs
+          }
+       )
+    . splitConns
+    $ evsATT
+  where
+    sim :: IOSim s ()
+    sim = multiNodeSim serverAcc Duplex (singletonScript noAttenuation)
+                       (bound `div` 10) l
+
+-- | Property wrapping `multinodeExperiment` that has a generator optimized for triggering
+-- pruning, and random generated number of connections hard limit.
+--
+-- This test tests if with a higher chance of pruning happening and a smaller number of
+-- connections hard limit we do not end up triggering any illegal transition in the
+-- Inbound Governor.
+--
+prop_multinode_ig_pruning_Sim :: Int -> MultiNodePruningScript Int -> Property
+prop_multinode_ig_pruning_Sim serverAcc (MultiNodePruningScript (Small bound) l) =
+  let trace = runSimTrace sim
+
+      evsRTT :: Octopus (Value ()) (RemoteTransitionTrace SimAddr)
+      evsRTT = octopusWithNameTraceEvents trace
+
+      evsIGT :: Octopus (Value ()) (InboundGovernorTrace SimAddr)
+      evsIGT = octopusWithNameTraceEvents trace
+
+  in tabulate "ConnectionEvents" (map showCEvs l)
+    . counterexample (ppScript (MultiNodeScript l))
+    . counterexample (ppOctopus show show evsRTT)
+    . counterexample (ppOctopus show show evsIGT)
+    . (\ ( tr1
+         , tr2
          )
        ->
+        -- Verify we do not return unsupported states in any of the
+        -- RemoteTransitionTrace
         ( getAllProperty
         . bifoldMap
             ( \ _ -> AllProperty (property True))
@@ -2160,88 +2178,32 @@ prop_multinode_pruning_Sim serverAcc (MultiNodePruningScript (Small bound) l) =
                 _     -> AllProperty (property True)
             )
 
-        $ tr3
+        $ tr2
         )
         .&&.
-        ( mkPropertyPruning
+        -- Verify that all Inbound Governor remote transitions are valid
+        ( getAllProperty
         . bifoldMap
-           ( \ case
-               MainReturn {} -> mempty
-               v             -> mempty { tpProperty = counterexample (show v) False }
+           ( \ _ -> AllProperty (property True) )
+           ( \ TransitionTrace {ttPeerAddr = peerAddr, ttTransition = tr} ->
+                 AllProperty
+               . counterexample (concat [ "Unexpected transition: "
+                                        , show peerAddr
+                                        , " "
+                                        , show tr
+                                        ])
+               . verifyRemoteTransition
+               $ tr
            )
-           ( \ trs
-            -> TestProperty {
-                 tpProperty =
-                     (counterexample $!
-                       (  "\nconnection:\n"
-                       ++ intercalate "\n" (map ppTransition trs))
-                       )
-                   . getAllProperty
-                   . foldMap ( \ tr
-                              -> AllProperty
-                               . (counterexample $!
-                                   (  "\nUnexpected transition: "
-                                   ++ show tr)
-                                   )
-                               . verifyAbstractTransition
-                               $ tr
-                             )
-                   $ trs,
-                 tpNumberOfTransitions = Sum (length trs),
-                 tpNumberOfConnections = Sum 1,
-                 tpNumberOfPrunings    = classifyPrunings evs',
-                 tpNegotiatedDataFlows = [classifyNegotiatedDataFlow trs],
-                 tpEffectiveDataFlows  = [classifyEffectiveDataFlow  trs],
-                 tpTerminationTypes    = [classifyTermination        trs],
-                 tpActivityTypes       = [classifyActivityType       trs],
-                 tpTransitions         = trs
-              }
-           )
-         . splitConns
-         $ tr2
-         )
-         .&&.
-         ( getAllProperty
-         . bifoldMap
-            ( \ _ -> AllProperty (property True) )
-            ( \ TransitionTrace {ttPeerAddr = peerAddr, ttTransition = tr} ->
-                  AllProperty
-                . counterexample (concat [ "Unexpected transition: "
-                                         , show peerAddr
-                                         , " "
-                                         , show tr
-                                         ])
-                . verifyRemoteTransition
-                $ tr
-            )
-         $ tr1
-         )
+        $ tr1
+        )
 
      )
-   . octoSplit
-   $ evs
+   $ (evsRTT, evsIGT)
   where
     sim :: IOSim s ()
-    sim = do
-      mb <- timeout 7200
-                    ( withSnocket sayTracer
-                                  (singletonScript noAttenuation)
-              $ \snocket ->
-                 multinodeExperiment (Tracer traceM)
-                                     (Tracer traceM)
-                                     (Tracer traceM)
-                                     (Tracer traceM)
-                                     snocket
-                                     Snocket.TestFamily
-                                     (Snocket.TestAddress 0)
-                                     serverAcc
-                                     Duplex
-                                     (bound `div` 10)
-                                     (unTestAddr <$> MultiNodeScript l)
-              )
-      case mb of
-        Nothing -> throwIO (SimulationTimeout :: ExperimentError SimAddr)
-        Just a  -> return a
+    sim = multiNodeSim serverAcc Duplex (singletonScript noAttenuation)
+                       (bound `div` 10) l
 
 -- | Property wrapping `multinodeExperiment` that has a generator optimized for triggering
 -- pruning, and random generated number of connections hard limit.
@@ -2250,69 +2212,65 @@ prop_multinode_pruning_Sim serverAcc (MultiNodePruningScript (Small bound) l) =
 --
 prop_hardlimit_Sim :: Int -> MultiNodePruningScript Int -> Property
 prop_hardlimit_Sim serverAcc (MultiNodePruningScript (Small bound) l) =
-  let evs :: Octopus (Value ())
-                     (Three (ConnectionManagerTrace SimAddr (ConnectionHandlerTrace UnversionedProtocol DataFlowProtocolData))
-                            (AbstractTransitionTrace SimAddr)
-                            (InboundGovernorTrace SimAddr)
-                     )
-      evs = fmap wnEvent
-          . Octopus.filter ((MainServer ==) . wnName)
-          . octoSelectTraceEvents
-              (\ev ->
-                case ev of
-                  EventLog dyn ->
-                        fmap First
-                        <$> fromDynamic
-                              @(WithName (Name SimAddr) (ConnectionManagerTrace SimAddr (ConnectionHandlerTrace UnversionedProtocol DataFlowProtocolData)))
-                              dyn
-                    <|> fmap Second
-                        <$> fromDynamic
-                              @(WithName (Name SimAddr) (AbstractTransitionTrace SimAddr))
-                              dyn
-                    <|> fmap Third
-                        <$> fromDynamic
-                              @(WithName (Name SimAddr) (InboundGovernorTrace SimAddr))
-                              dyn
-                  _ ->
-                       Nothing
-              )
-          $ runSimTrace sim
+  let trace = runSimTrace sim
+
+      evsCMT :: Octopus (Value ())
+                        (ConnectionManagerTrace
+                          SimAddr
+                          (ConnectionHandlerTrace
+                            UnversionedProtocol
+                            DataFlowProtocolData))
+      evsCMT = octopusWithNameTraceEvents trace
+
+      evsATT :: Octopus (Value ()) (AbstractTransitionTrace SimAddr)
+      evsATT = octopusWithNameTraceEvents trace
+
+      evsIGT :: Octopus (Value ()) (InboundGovernorTrace SimAddr)
+      evsIGT = octopusWithNameTraceEvents trace
+
   in tabulate "ConnectionEvents" (map showCEvs l)
+    -- . counterexample (ppTrace_ trace)
     . counterexample (ppScript (MultiNodeScript l))
-    . counterexample (ppOctopus show show evs)
-    . (\ ( tr1
-         , _
-         , _
-         )
-       -> getAllProperty
-       . bifoldMap
-           ( \ case
-               MainReturn {} -> mempty
-               _             -> AllProperty (property False)
-           )
-           ( \ trs ->
-             case trs of
-               TrConnectionManagerCounters cmc ->
-                 AllProperty
-                  . counterexample ("HardLimit: " ++ show (bound `div` 10) ++
-                                    ", but got: " ++ show (incomingConns cmc) ++
-                                    " incoming connections!\n" ++
-                                    show cmc
-                                   )
-                  . property
-                  $ incomingConns cmc <= fromIntegral (bound `div` 10)
-               _ -> mempty
-           )
-        $ tr1
-      )
-   . octoSplit
-   $ evs
+    . counterexample (ppOctopus show show evsCMT)
+    . counterexample (ppOctopus show show evsATT)
+    . counterexample (ppOctopus show show evsIGT)
+    . getAllProperty
+    . bifoldMap
+        ( \ case
+            MainReturn {} -> mempty
+            _             -> AllProperty (property False)
+        )
+        ( \ trs ->
+            case trs of
+              x -> case x of
+                (TrConnectionManagerCounters cmc) ->
+                    AllProperty
+                    . counterexample ("HardLimit: " ++ show (bound `div` 10) ++
+                                      ", but got: " ++ show (incomingConns cmc) ++
+                                      " incoming connections!\n" ++
+                                      show cmc
+                                     )
+                    . property
+                    $ incomingConns cmc <= fromIntegral (bound `div` 10)
+                _ -> mempty
+        )
+   $ evsCMT
   where
     sim :: IOSim s ()
-    sim = do
+    sim = multiNodeSim serverAcc Duplex (singletonScript noAttenuation)
+                       (bound `div` 10) l
+
+multiNodeSim :: (Serialise req, Show req, Eq req, Typeable req)
+             => req
+             -> DataFlow
+             -> Script BearerInfo
+             -> Word32
+             -> [ConnectionEvent req TestAddr]
+             -> IOSim s ()
+multiNodeSim serverAcc dataFlow script bound l = do
       mb <- timeout 7200
                     ( withSnocket sayTracer
-                                  (singletonScript noAttenuation)
+                                  script
               $ \snocket ->
                  multinodeExperiment (Tracer traceM)
                                      (Tracer traceM)
@@ -2322,38 +2280,20 @@ prop_hardlimit_Sim serverAcc (MultiNodePruningScript (Small bound) l) =
                                      Snocket.TestFamily
                                      (Snocket.TestAddress 0)
                                      serverAcc
-                                     Duplex
-                                     (bound `div` 10)
+                                     dataFlow
+                                     bound
                                      (unTestAddr <$> MultiNodeScript l)
               )
       case mb of
         Nothing -> throwIO (SimulationTimeout :: ExperimentError SimAddr)
         Just a  -> return a
 
--- Right fold of the 'Octopus' which splits its results.
---
-octoSplit :: Octopus a (Three b c d) -> (Octopus a b, Octopus a c, Octopus a d)
-octoSplit = go [] [] []
-  where
-    -- this version seems the fastest one (faster than a strict version, DList
-    -- style or a coinductive definition).
-    go :: [b] -> [c] -> [d]
-       -> Octopus a (Three b c d)
-       -> (Octopus a b, Octopus a c, Octopus a d)
-    go bs cs ds (Nil a) = ( foldl' (flip Cons) (Nil a) bs
-                          , foldl' (flip Cons) (Nil a) cs
-                          , foldl' (flip Cons) (Nil a) ds
-                          )
-    go bs cs ds (Cons (First  b) o) = go (b : bs)      cs       ds o
-    go bs cs ds (Cons (Second c) o) = go      bs  (c : cs)      ds o
-    go bs cs ds (Cons (Third d) o) = go       bs       cs  (d : ds) o
-
 -- | Connection terminated while negotiating it.
 --
 unit_connection_terminated_when_negotiating :: Property
 unit_connection_terminated_when_negotiating =
-    prop_multinode_Sim
-        0 (ArbDataFlow Unidirectional)
+  let arbDataFlow = ArbDataFlow Unidirectional
+      absBearerInfo =
         AbsBearerInfo
           { abiConnectionDelay = SmallDelay
           , abiInboundAttenuation = NoAttenuation FastSpeed
@@ -2362,18 +2302,26 @@ unit_connection_terminated_when_negotiating =
           , abiOutboundWriteFailure = Just 3
           , abiSDUSize = LargeSDU
           }
-        (MultiNodeScript
-          [ StartServer 0           (TestAddr {unTestAddr = TestAddress 24}) 0
-          , OutboundConnection 0    (TestAddr {unTestAddr = TestAddress 24})
-          , StartServer 0           (TestAddr {unTestAddr = TestAddress 40}) 0
-          , OutboundMiniprotocols 0 (TestAddr {unTestAddr = TestAddress 24})
-                                    (Bundle { withHot         = WithHot [0]
-                                            , withWarm        = WithWarm []
-                                            , withEstablished = WithEstablished []
-                                            })
-          , OutboundConnection 0    (TestAddr {unTestAddr = TestAddress 40})
-          ])
-
+      multiNodeScript =
+        MultiNodeScript
+         [ StartServer 0           (TestAddr {unTestAddr = TestAddress 24}) 0
+         , OutboundConnection 0    (TestAddr {unTestAddr = TestAddress 24})
+         , StartServer 0           (TestAddr {unTestAddr = TestAddress 40}) 0
+         , OutboundMiniprotocols 0 (TestAddr {unTestAddr = TestAddress 24})
+                                   (Bundle { withHot         = WithHot [0]
+                                           , withWarm        = WithWarm []
+                                           , withEstablished = WithEstablished []
+                                           })
+         , OutboundConnection 0    (TestAddr {unTestAddr = TestAddress 40})
+         ]
+   in
+    prop_multinode_cm_Sim
+        0 arbDataFlow absBearerInfo
+        multiNodeScript
+    .&&.
+    prop_multinode_ig_Sim
+        0 arbDataFlow absBearerInfo
+        multiNodeScript
 
 splitConns :: Octopus (Value ()) (AbstractTransitionTrace SimAddr)
            -> Octopus (Value ()) [AbstractTransition]
@@ -2450,6 +2398,21 @@ data WithName name event = WithName {
   deriving (Show, Functor)
 
 type AbstractTransitionTrace addr = TransitionTrace' addr AbstractState
+
+octopusWithNameTraceEvents :: forall b. Typeable b
+                    => Trace () -> Octopus (Value ()) b
+octopusWithNameTraceEvents = fmap wnEvent
+          . Octopus.filter ((MainServer ==) . wnName)
+          . octoSelectTraceEventsDynamic
+              @()
+              @(WithName (Name SimAddr) b)
+
+withNameTraceEvents :: forall b. Typeable b => Trace () -> [b]
+withNameTraceEvents = fmap wnEvent
+          . filter ((MainServer ==) . wnName)
+          . selectTraceEventsDynamic
+              @()
+              @(WithName (Name SimAddr) b)
 
 sayTracer :: (MonadSay m, MonadTime m, Show a) => Tracer m a
 sayTracer = Tracer $
