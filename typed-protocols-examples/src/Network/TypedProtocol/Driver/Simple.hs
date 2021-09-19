@@ -34,6 +34,7 @@ module Network.TypedProtocol.Driver.Simple (
 import Data.Singletons
 
 import Network.TypedProtocol.Core
+import Network.TypedProtocol.Peer
 import Network.TypedProtocol.Driver
 import Network.TypedProtocol.Channel
 import Network.TypedProtocol.Codec

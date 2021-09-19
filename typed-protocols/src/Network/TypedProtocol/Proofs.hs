@@ -39,6 +39,7 @@ module Network.TypedProtocol.Proofs (
   ) where
 
 import Network.TypedProtocol.Core
+import Network.TypedProtocol.Peer
 import Data.Function ((&))
 import Data.Singletons
 import Data.Kind (Type)
