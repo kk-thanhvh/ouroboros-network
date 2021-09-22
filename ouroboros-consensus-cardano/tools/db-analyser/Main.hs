@@ -131,8 +131,7 @@ parseLimit = asum [
     Limit . read <$> strOption (mconcat [
         long "num-blocks-to-process"
       , help "Maximum number of blocks we want to process"
-      , metavar "INT"
-      ])
+      , metavar "INT"])
   , pure Unlimited
   ]
 
