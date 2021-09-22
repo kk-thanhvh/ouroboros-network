@@ -126,6 +126,8 @@ tests =
                  prop_multinode_cm_Sim
   , testProperty "multinode_ig_Sim"
                  prop_multinode_ig_Sim
+  , testProperty "multinode_cm_order_Sim"
+                 prop_multinode_cm_order_Sim
   , testProperty "unit_connection_terminated_when_negotiating"
                  unit_connection_terminated_when_negotiating
   , testGroup "generators"
@@ -1913,6 +1915,35 @@ data Three a b c
   deriving Show
 
 
+-- Assuming all transitions in the transition list are valid, we only need to
+-- look at the 'toState' of the current transition and the 'fromState' of the
+-- next transition.
+verifyAbstractTransitionOrder :: [AbstractTransition]
+                              -> AllProperty
+verifyAbstractTransitionOrder [] = mempty
+verifyAbstractTransitionOrder (h:t) = go t h
+  where
+    go :: [AbstractTransition] -> AbstractTransition -> AllProperty
+    -- All transitions must end in the 'UnknownConnectionSt', and since we assume all
+    -- transitions are valid we do not have to check the 'fromState'
+    go [] (Transition _ UnknownConnectionSt) = mempty
+    go [] tr@(Transition _ _)          =
+      AllProperty
+        $ counterexample
+            ("\nUnexpected last transition: " ++ show tr)
+            (property False)
+    -- All transitions have to be in correct order, which means that the current
+    -- state we are looking at (current toState) needs to be equal to the next
+    -- 'fromState', in order for the transition chain to be correct.
+    go (next@(Transition nextFromState _) : ts)
+        curr@(Transition _ currToState) =
+         (AllProperty
+           $ counterexample
+               ("\nUnexpected transition order!\nWent from: "
+               ++ show curr ++ "\nto: " ++ show next)
+               (property (currToState == nextFromState)))
+         <> go ts next
+
 
 -- | Property wrapping `multinodeExperiment`.
 --
@@ -1977,6 +2008,31 @@ prop_multinode_cm_Sim serverAcc (ArbDataFlow dataFlow) absBi script@(MultiNodeSc
                        (Script (toBearerInfo absBi :| [noAttenuation]))
                        maxBound l
 
+prop_multinode_cm_order_Sim :: Int -> ArbDataFlow -> AbsBearerInfo -> MultiNodeScript Int TestAddr -> Property
+prop_multinode_cm_order_Sim serverAcc (ArbDataFlow dataFlow) absBi script@(MultiNodeScript l) =
+  let trace = runSimTrace sim
+
+      evsATT :: Octopus (Value ()) (AbstractTransitionTrace SimAddr)
+      evsATT = octopusWithNameTraceEvents trace
+
+  in tabulate "ConnectionEvents" (map showCEvs l)
+    . counterexample (ppScript script)
+    . counterexample (ppOctopus show show evsATT)
+    -- . counterexample (ppTrace_ trace)
+    . getAllProperty
+    . bifoldMap
+       ( \ case
+           MainReturn {} -> mempty
+           _             -> AllProperty (property False)
+       )
+       verifyAbstractTransitionOrder
+    . splitConns
+    $ evsATT
+  where
+    sim :: IOSim s ()
+    sim = multiNodeSim serverAcc dataFlow
+                       (Script (toBearerInfo absBi :| [noAttenuation]))
+                       maxBound l
 
 -- | Property wrapping `multinodeExperiment`.
 --
