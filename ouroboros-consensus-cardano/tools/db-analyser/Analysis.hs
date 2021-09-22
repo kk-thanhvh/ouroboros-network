@@ -305,7 +305,7 @@ processAllImmutableDB immutableDB rr blockComponent limit initState callback = d
     go :: ImmutableDB.Iterator IO blk b -> Limit -> st -> IO st
     go itr lt !st = case decreaseLimit lt of
       Nothing               -> return st
-      Just decreasedLimit -> do
+      Just decreasedLimit   -> do
         itrResult <- ImmutableDB.iteratorNext itr
         case itrResult of
           ImmutableDB.IteratorExhausted -> return st
