@@ -34,8 +34,6 @@ import qualified Network.DNS as DNS
 import qualified Network.Socket as Socket
 #if !defined(mingw32_HOST_OS)
 import qualified Network.Socket.ByteString.Lazy as Socket (recv, sendAll)
-#else
-import qualified System.Win32.Async.Socket.ByteString.Lazy as Win32.Async
 #endif
 
 --TODO: time utils should come from elsewhere
@@ -493,13 +491,10 @@ prop_sub_io lr = ioProperty $ withIOManager $ \iocp -> do
         :: StrictTVar IO Int
         -> Socket.Socket
         -> IO ()
-    initiatorCallback clientCountVar sd = do
-#if defined(mingw32_HOST_OS)
-        Win32.Async.sendAll sd $ BL.singleton 42
-        _ <- Win32.Async.recv sd 1
-#else
-        Socket.sendAll sd $ BL.singleton 42
-        _ <- Socket.recv sd 1
+    initiatorCallback clientCountVar _sd = do
+#if !defined(mingw32_HOST_OS)
+        Socket.sendAll _sd $ BL.singleton 42
+        _ <- Socket.recv _sd 1
 #endif
 
         atomically $ modifyTVar clientCountVar (\a -> a - 1)
@@ -518,13 +513,10 @@ prop_sub_io lr = ioProperty $ withIOManager $ \iocp -> do
                 bracket
                     (Socket.accept sd)
                     (\(sd',_) -> Socket.close sd')
-                    (\(sd',_) -> do
-#if defined(mingw32_HOST_OS)
-                        buf <- Win32.Async.recv sd' 1
-                        Win32.Async.sendAll sd' buf
-#else
-                        buf <- Socket.recv sd' 1
-                        Socket.sendAll sd' buf
+                    (\(_sd',_) -> do
+#if !defined(mingw32_HOST_OS)
+                        buf <- Socket.recv _sd' 1
+                        Socket.sendAll _sd' buf
 #endif
 
                         atomically $ modifyTVar traceVar (\sids -> sid:sids)
