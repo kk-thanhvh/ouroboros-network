@@ -954,12 +954,13 @@ withConnectionManager ConnectionManagerArguments {
                               (const $ Connected connId dataFlow handle)
                               mbTransition)
 
-
+    -- Needs 'mask' in order to guarantee that the traces are logged if the an
+    -- Async exception lands between the successful STM action and the logging action.
     unregisterInboundConnectionImpl
         :: StrictTMVar m (ConnectionManagerState peerAddr handle handleError version m)
         -> peerAddr
         -> m (OperationResult DemotedToColdRemoteTr)
-    unregisterInboundConnectionImpl stateVar peerAddr = do
+    unregisterInboundConnectionImpl stateVar peerAddr = mask $ \restore -> do
       traceWith tracer (TrUnregisterConnection Inbound peerAddr)
       (mbThread, mbTransition, result) <- atomically $ do
         state <- readTMVar stateVar
@@ -1068,7 +1069,7 @@ withConnectionManager ConnectionManagerArguments {
       traceCounters stateVar
 
       traverse_ cancel mbThread
-      return result
+      restore $ return result
 
 
     requestOutboundConnectionImpl
@@ -1577,7 +1578,7 @@ withConnectionManager ConnectionManagerArguments {
                 -- @
                 --   DemotedToCold^{Duplex}_{Local}
                 --     : OutboundState Duplex
-                --     → InboundIdleState^\tau
+                --     → OutboundIdleState^\tau
                 -- @
                 let connState' = OutboundIdleState connId connThread handle
                                                    Duplex
@@ -1776,11 +1777,13 @@ withConnectionManager ConnectionManagerArguments {
           return (OperationSuccess a)
 
 
+    -- Needs 'mask' in order to guarantee that the traces are logged if the an
+    -- Async exception lands between the successful STM action and the logging action.
     promotedToWarmRemoteImpl
         :: StrictTMVar m (ConnectionManagerState peerAddr handle handleError version m)
         -> peerAddr
         -> m (OperationResult AbstractState)
-    promotedToWarmRemoteImpl stateVar peerAddr = do
+    promotedToWarmRemoteImpl stateVar peerAddr = mask $ \restore -> do
       result <- atomically $ do
         state <- readTMVar stateVar
         let mbConnVar = Map.lookup peerAddr state
@@ -1910,8 +1913,8 @@ withConnectionManager ConnectionManagerArguments {
           -- - set the state to 'TerminatedState'
           traverse_ cancel pruneMap
 
-        _ -> return ()
-      return (abstractState . fromState <$> fst result)
+        _ -> pure ()
+      restore $ return (abstractState . fromState <$> fst result)
 
 
     demotedToColdRemoteImpl
