@@ -5,10 +5,12 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneKindSignatures #-}
 {-# LANGUAGE TypeInType #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE EmptyCase #-}
 
 -- | Actions for running 'Peer's with a 'Driver'
@@ -30,8 +32,10 @@ module Network.TypedProtocol.Driver (
   ) where
 
 import Data.Singletons
+import Data.Kind (Type)
+import Unsafe.Coerce (unsafeCoerce)
 
-import Network.TypedProtocol.Core
+import Network.TypedProtocol.Core hiding (SingQueue (..))
 import Network.TypedProtocol.Peer
 import Network.TypedProtocol.Codec (SomeMessage (..), DecodeStep (..))
 
@@ -133,6 +137,80 @@ data Driver ps (pr :: PeerRole) bytes failure dstate m =
 -- Running peers
 --
 
+
+-- | A space efficient singleton for 'Queue' type.  It has
+-- two public constructors 'SingSingleton' and 'SingCons'.
+--
+type    SingQueue :: Queue ps -> Type
+newtype SingQueue q = UnsafeSingQueue Int
+
+-- | 'NonEmpty' is an auxiliary type which allows to pattern match if the queue
+-- is a singleton or not.  The 'toNonEmpty' function converts 'SingQueue' to
+-- 'NonEmpty' in an efficient way.
+--
+-- 'NonEmpty' mimicks an inductive definition, but instead recursion, it is using
+-- 'SingQueue' in its 'IsCons' constructor.
+--
+type NonEmpty :: Queue ps -> Type
+data NonEmpty q where
+    IsSingleton :: forall ps (st :: ps) (st' :: ps). 
+                   NonEmpty (Tr st st' <| Empty)
+    IsCons      :: forall ps (st :: ps) (st' :: ps)
+                             (st'' :: ps) (st''' :: ps)
+                             (q :: Queue ps).
+                   SingQueue              (Tr st'' st''' <| q)
+                -> NonEmpty   (Tr st st' <| Tr st'' st''' <| q)
+
+-- | Transform 'SingQueue' to 'NonEmpty'.  Although this function is using
+-- 'unsafeCoerce' it is safe.
+--
+toNonEmpty :: SingQueue q -> NonEmpty q
+toNonEmpty (UnsafeSingQueue n) | n <= 0
+                               = error "toNonEmpty: invalid value"
+toNonEmpty (UnsafeSingQueue 1) = unsafeCoerce IsSingleton
+toNonEmpty (UnsafeSingQueue n) = unsafeCoerce (IsCons (UnsafeSingQueue $ pred n))
+  -- we subtract one, because 'IsCons' constructor takes singleton for the
+  -- remaining part of the list.
+
+
+-- | A safe 'SingQueue' bidirectional pattern for queues which holds exactly
+-- one element.
+--
+pattern SingSingleton :: ()
+                      => q ~ (Tr st st' <| Empty)
+                      => SingQueue q
+pattern SingSingleton <- (toNonEmpty -> IsSingleton) where
+  SingSingleton = UnsafeSingQueue 1
+
+-- | A safe 'SingQueue' bidirectional pattern for queues of length 2 or more.
+--
+pattern SingCons :: forall ps (q :: Queue ps).
+                    ()
+                 => forall (st   :: ps) (st'   :: ps)
+                           (st'' :: ps) (st''' :: ps)
+                           (q'   :: Queue ps).
+                    q ~ (Tr st st' <| Tr st'' st''' <| q')
+                 => SingQueue (Tr st'' st''' <| q')
+                    -- ^ singleton for the remaining part of the queue
+                 -> SingQueue q
+pattern SingCons n <- (toNonEmpty -> IsCons n)
+  where
+    SingCons (UnsafeSingQueue n) = SingCons (UnsafeSingQueue (succ n))
+
+{-# COMPLETE SingSingleton, SingCons #-}
+
+snoc :: forall ps (st :: ps) (st' :: ps) (q :: Queue ps).
+        SingQueue q
+     -> SingTrans (Tr st st')
+     -> SingQueue (q |> Tr st st')
+snoc SingSingleton _ = SingCons SingSingleton
+snoc (SingCons n)  x = SingCons (n `snoc` x)
+
+uncons :: SingQueue (Tr st st <| (Tr st' st'' <| q))
+       -> SingQueue              (Tr st' st'' <| q)
+uncons (SingCons q@SingSingleton) = q
+uncons (SingCons q@SingCons {})   = q
+
 -- | Run a peer with the given driver.
 --
 -- This runs the peer to completion (if the protocol allows for termination).
@@ -166,7 +244,7 @@ runPeerWithDriver Driver{sendMessage, recvMessage, tryRecvMessage} =
 
     goEmpty !dstate (YieldPipelined refl msg k) = do
       !dstate' <- sendMessage refl msg dstate
-      go (SingCons SingEmpty) (Right dstate') k
+      go SingSingleton (Right dstate') k
 
 
     go :: forall st1 st2 st3 q'.
@@ -185,7 +263,7 @@ runPeerWithDriver Driver{sendMessage, recvMessage, tryRecvMessage} =
                   (k   :: Peer ps pr pl ((Tr st1 st2 <| q') |> Tr st' st'') st'' m a))
                 = do
       !dstate' <- sendMessage refl msg (getDState dstate)
-      go (q |> (SingTr :: SingTrans (Tr st' st'')))
+      go (q `snoc` (SingTr :: SingTrans (Tr st' st'')))
          (setDState dstate' dstate) k
 
     go (SingCons q) !dstate (Collect refl Nothing k) = do
@@ -200,14 +278,25 @@ runPeerWithDriver Driver{sendMessage, recvMessage, tryRecvMessage} =
         Right (SomeMessage msg, dstate') ->
           go (SingCons q') (Right dstate') (k msg)
 
+    go SingSingleton !dstate (Collect refl Nothing k) = do
+      (SomeMessage msg, dstate') <- recvMessage refl dstate
+      go SingSingleton (Right dstate') (k msg)
 
-    go (SingCons SingEmpty)     (Right dstate) (CollectDone k) =
+    go q@SingSingleton !dstate (Collect refl (Just k') k) = do
+      r <- tryRecvMessage refl dstate
+      case r of
+        Left dstate' ->
+          go q (Left dstate') k'
+        Right (SomeMessage msg, dstate') ->
+          go SingSingleton (Right dstate') (k msg)
+
+    go SingSingleton (Right dstate) (CollectDone k) =
       goEmpty dstate k
 
-    go (SingCons q@SingCons {}) (Right dstate) (CollectDone k) =
-      go q (Right dstate) k
+    go q@SingCons {} (Right dstate) (CollectDone k) =
+      go (uncons q) (Right dstate) k
 
-    go  SingCons {}              Left {}        CollectDone {} =
+    go _q                           Left {}     CollectDone {} =
       -- 'CollectDone' can only be issues once `Collect` was effective, which
       -- means we cannot have a partial decoder.
       error "runPeerWithDriver: unexpected parital decoder"
