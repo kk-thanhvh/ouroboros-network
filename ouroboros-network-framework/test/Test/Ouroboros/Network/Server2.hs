@@ -128,6 +128,8 @@ tests =
                  prop_multinode_ig_Sim
   , testProperty "multinode_cm_order_Sim"
                  prop_multinode_cm_order_Sim
+  , testProperty "multinode_ig_order_Sim"
+                 prop_multinode_ig_order_Sim
   , testProperty "unit_connection_terminated_when_negotiating"
                  unit_connection_terminated_when_negotiating
   , testGroup "generators"
@@ -1937,13 +1939,42 @@ verifyAbstractTransitionOrder (h:t) = go t h
     -- 'fromState', in order for the transition chain to be correct.
     go (next@(Transition nextFromState _) : ts)
         curr@(Transition _ currToState) =
-         (AllProperty
-           $ counterexample
-               ("\nUnexpected transition order!\nWent from: "
-               ++ show curr ++ "\nto: " ++ show next)
-               (property (currToState == nextFromState)))
+         AllProperty
+           (counterexample
+              ("\nUnexpected transition order!\nWent from: "
+              ++ show curr ++ "\nto: " ++ show next)
+              (property (currToState == nextFromState)))
          <> go ts next
 
+-- Assuming all transitions in the transition list are valid, we only need to
+-- look at the 'toState' of the current transition and the 'fromState' of the
+-- next transition.
+verifyRemoteTransitionOrder :: [RemoteTransition]
+                            -> AllProperty
+verifyRemoteTransitionOrder [] = mempty
+verifyRemoteTransitionOrder (h:t) = go t h
+  where
+    go :: [RemoteTransition] -> RemoteTransition -> AllProperty
+    -- All transitions must end in the 'Nothing' (final) state, and since
+    -- we assume all transitions are valid we do not have to check the
+    -- 'fromState' .
+    go [] (Transition _ Nothing) = mempty
+    go [] tr@(Transition _ _)          =
+      AllProperty
+        $ counterexample
+            ("\nUnexpected last transition: " ++ show tr)
+            (property False)
+    -- All transitions have to be in correct order, which means that the current
+    -- state we are looking at (current toState) needs to be equal to the next
+    -- 'fromState', in order for the transition chain to be correct.
+    go (next@(Transition nextFromState _) : ts)
+        curr@(Transition _ currToState) =
+         AllProperty
+           (counterexample
+              ("\nUnexpected transition order!\nWent from: "
+              ++ show curr ++ "\nto: " ++ show next)
+              (property (currToState == nextFromState)))
+         <> go ts next
 
 -- | Property wrapping `multinodeExperiment`.
 --
@@ -2108,6 +2139,37 @@ prop_multinode_ig_Sim serverAcc (ArbDataFlow dataFlow) absBi script@(MultiNodeSc
     sim = multiNodeSim serverAcc dataFlow
                        (Script (toBearerInfo absBi :| [noAttenuation]))
                        maxBound l
+
+prop_multinode_ig_order_Sim :: Int -> ArbDataFlow -> AbsBearerInfo -> MultiNodeScript Int TestAddr -> Property
+prop_multinode_ig_order_Sim serverAcc (ArbDataFlow dataFlow) absBi script@(MultiNodeScript l) =
+  let trace = runSimTrace sim
+
+      evsRTT :: Octopus (Value ()) (RemoteTransitionTrace SimAddr)
+      evsRTT = octopusWithNameTraceEvents trace
+
+      evsIGT :: Octopus (Value ()) (InboundGovernorTrace SimAddr)
+      evsIGT = octopusWithNameTraceEvents trace
+
+  in tabulate "ConnectionEvents" (map showCEvs l)
+    . counterexample (ppOctopus show show evsIGT)
+    . counterexample (ppScript script)
+    . counterexample (ppOctopus show show evsRTT)
+    -- . counterexample (ppTrace_ trace)
+    . getAllProperty
+    . bifoldMap
+       ( \ case
+           MainReturn {} -> mempty
+           _             -> AllProperty (property False)
+       )
+       verifyRemoteTransitionOrder
+    . splitRemoteConns
+    $ evsRTT
+  where
+    sim :: IOSim s ()
+    sim = multiNodeSim serverAcc dataFlow
+                       (Script (toBearerInfo absBi :| [noAttenuation]))
+                       maxBound l
+
 
 -- | Property wrapping `multinodeExperiment` that has a generator optimized for triggering
 -- pruning, and random generated number of connections hard limit.
@@ -2391,6 +2453,34 @@ splitConns =
       ( \ s TransitionTrace { ttPeerAddr, ttTransition } ->
           case ttTransition of
             Transition _ UnknownConnectionSt ->
+              case ttPeerAddr `Map.lookup` s of
+                Nothing  -> ( Map.insert ttPeerAddr [ttTransition] s
+                            , Nothing
+                            )
+                Just trs -> ( Map.delete ttPeerAddr s
+                            , Just (reverse $ ttTransition : trs)
+                            )
+            _ ->            ( Map.alter ( \ case
+                                              Nothing -> Just [ttTransition]
+                                              Just as -> Just (ttTransition : as)
+                                        ) ttPeerAddr s
+                            , Nothing
+                            )
+      )
+      Map.empty
+
+splitRemoteConns :: Octopus (Value ()) (RemoteTransitionTrace SimAddr)
+           -> Octopus (Value ()) [RemoteTransition]
+splitRemoteConns =
+    bimap id fromJust
+  . Octopus.filter isJust
+  -- there might be some connections in the state, push them onto the 'Octopus'
+  . (\(s, o) -> foldr (\a as -> Octopus.Cons (Just a) as) o (Map.elems s))
+  . bimapAccumL
+      ( \ s a -> ( s, a))
+      ( \ s TransitionTrace { ttPeerAddr, ttTransition } ->
+          case ttTransition of
+            Transition _ Nothing ->
               case ttPeerAddr `Map.lookup` s of
                 Nothing  -> ( Map.insert ttPeerAddr [ttTransition] s
                             , Nothing
