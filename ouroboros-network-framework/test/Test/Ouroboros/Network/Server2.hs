@@ -122,6 +122,8 @@ tests =
   , testProperty "bidirectional_Sim"  prop_bidirectional_Sim
   , testProperty "multinode_pruning_Sim"
                  prop_multinode_pruning_Sim
+  , testProperty "hardlimit_Sim"
+                 prop_hardlimit_Sim
   , testProperty "multinode_Sim"      prop_multinode_Sim
   , testProperty "unit_connection_terminated_when_negotiating"
                  unit_connection_terminated_when_negotiating
@@ -2134,7 +2136,12 @@ prop_multinode_pruning_Sim serverAcc (MultiNodePruningScript (Small bound) l) =
                 TrDemotedToColdRemote _ res ->
                   case res of
                     UnsupportedState {}
-                      -> AllProperty (counterexample (show tr) False)
+                      -> AllProperty
+                          $ counterexample
+                              ("Unexpected UnsupportedState "
+                              ++ "in unregisterInboundConnection "
+                              ++ show tr)
+                              False
                     _ -> AllProperty (property True)
 
                 -- verify that 'demotedToColdRemote' does not return
@@ -2142,7 +2149,12 @@ prop_multinode_pruning_Sim serverAcc (MultiNodePruningScript (Small bound) l) =
                 TrWaitIdleRemote _ res ->
                   case res of
                     UnsupportedState {}
-                      -> AllProperty (counterexample (show tr) False)
+                      -> AllProperty
+                          $ counterexample
+                              ("Unexpected UnsupportedState "
+                              ++ "in demotedToColdRemote "
+                              ++ show tr)
+                              False
                     _ -> AllProperty (property True)
 
                 _     -> AllProperty (property True)
@@ -2206,6 +2218,93 @@ prop_multinode_pruning_Sim serverAcc (MultiNodePruningScript (Small bound) l) =
          )
 
      )
+   . octoSplit
+   $ evs
+  where
+    sim :: IOSim s ()
+    sim = do
+      mb <- timeout 7200
+                    ( withSnocket sayTracer
+                                  (singletonScript noAttenuation)
+              $ \snocket ->
+                 multinodeExperiment (Tracer traceM)
+                                     (Tracer traceM)
+                                     (Tracer traceM)
+                                     (Tracer traceM)
+                                     snocket
+                                     Snocket.TestFamily
+                                     (Snocket.TestAddress 0)
+                                     serverAcc
+                                     Duplex
+                                     (bound `div` 10)
+                                     (unTestAddr <$> MultiNodeScript l)
+              )
+      case mb of
+        Nothing -> throwIO (SimulationTimeout :: ExperimentError SimAddr)
+        Just a  -> return a
+
+-- | Property wrapping `multinodeExperiment` that has a generator optimized for triggering
+-- pruning, and random generated number of connections hard limit.
+--
+-- We test that we never go above hard limit of incoming connections.
+--
+prop_hardlimit_Sim :: Int -> MultiNodePruningScript Int -> Property
+prop_hardlimit_Sim serverAcc (MultiNodePruningScript (Small bound) l) =
+  let evs :: Octopus (Value ())
+                     (Three (ConnectionManagerTrace SimAddr (ConnectionHandlerTrace UnversionedProtocol DataFlowProtocolData))
+                            (AbstractTransitionTrace SimAddr)
+                            (InboundGovernorTrace SimAddr)
+                     )
+      evs = fmap wnEvent
+          . Octopus.filter ((MainServer ==) . wnName)
+          . octoSelectTraceEvents
+              (\ev ->
+                case ev of
+                  EventLog dyn ->
+                        fmap First
+                        <$> fromDynamic
+                              @(WithName (Name SimAddr) (ConnectionManagerTrace SimAddr (ConnectionHandlerTrace UnversionedProtocol DataFlowProtocolData)))
+                              dyn
+                    <|> fmap Second
+                        <$> fromDynamic
+                              @(WithName (Name SimAddr) (AbstractTransitionTrace SimAddr))
+                              dyn
+                    <|> fmap Third
+                        <$> fromDynamic
+                              @(WithName (Name SimAddr) (InboundGovernorTrace SimAddr))
+                              dyn
+                  _ ->
+                       Nothing
+              )
+          $ runSimTrace sim
+  in tabulate "ConnectionEvents" (map showCEvs l)
+    . counterexample (ppScript (MultiNodeScript l))
+    . counterexample (ppOctopus show show evs)
+    . (\ ( tr1
+         , _
+         , _
+         )
+       -> getAllProperty
+       . bifoldMap
+           ( \ case
+               MainReturn {} -> mempty
+               _             -> AllProperty (property False)
+           )
+           ( \ trs ->
+             case trs of
+               TrConnectionManagerCounters cmc ->
+                 AllProperty
+                  . counterexample ("HardLimit: " ++ show (bound `div` 10) ++
+                                    ", but got: " ++ show (incomingConns cmc) ++
+                                    " incoming connections!\n" ++
+                                    show cmc
+                                   )
+                  . property
+                  $ incomingConns cmc <= fromIntegral (bound `div` 10)
+               _ -> mempty
+           )
+        $ tr1
+      )
    . octoSplit
    $ evs
   where
