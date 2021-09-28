@@ -84,6 +84,7 @@ executable db-analyser
                      , contra-tracer
                      , mtl
                      , optparse-applicative
+                     , serialise
                      , shelley-spec-ledger
                      , strict-containers
                      , text
