@@ -57,6 +57,7 @@ import           Data.Maybe (fromMaybe, fromJust, isJust)
 import           Data.Monoid (Sum (..))
 import           Data.Typeable (Typeable)
 import           Data.Void (Void)
+import           Data.Word
 
 import           Text.Printf
 
@@ -118,6 +119,8 @@ tests =
   , testProperty "unidirectional_Sim" prop_unidirectional_Sim
   , testProperty "bidirectional_IO"   prop_bidirectional_IO
   , testProperty "bidirectional_Sim"  prop_bidirectional_Sim
+  , testProperty "multinode_pruning_Sim"
+                 prop_multinode_pruning_Sim
   , testProperty "multinode_Sim"      prop_multinode_Sim
   , testProperty "unit_connection_terminated_when_negotiating"
                  unit_connection_terminated_when_negotiating
@@ -308,6 +311,10 @@ withInitiatorOnlyConnectionManager
     -- ^ identifier (for logging)
     -> Timeouts
     -> Tracer m (WithName name (AbstractTransitionTrace peerAddr))
+    -> Tracer m (WithName name
+                          (ConnectionManagerTrace
+                            peerAddr
+                            (ConnectionHandlerTrace UnversionedProtocol DataFlowProtocolData)))
     -> Snocket m socket peerAddr
     -- ^ series of request possible to do with the bidirectional connection
     -- manager towards some peer.
@@ -316,22 +323,24 @@ withInitiatorOnlyConnectionManager
     -- ^ Functions to get the next requests for a given connection
     -> ProtocolTimeLimits (Handshake UnversionedProtocol Term)
     -- ^ Handshake time limits
+    -> Word32
+    -- ^ AcceptedConnectionsLimit (server hard limit)
     -> (MuxConnectionManager
           InitiatorMode socket peerAddr
           UnversionedProtocol ByteString m [resp] Void
        -> m a)
     -> m a
-withInitiatorOnlyConnectionManager name timeouts cmTrTracer snocket localAddr
-                                   nextRequests handshakeTimeLimits k = do
+withInitiatorOnlyConnectionManager name timeouts trTracer cmTracer snocket localAddr
+                                   nextRequests handshakeTimeLimits bound k = do
     mainThreadId <- myThreadId
     let muxTracer = (name,) `contramap` nullTracer -- mux tracer
     withConnectionManager
       ConnectionManagerArguments {
           -- ConnectionManagerTrace
           cmTracer    = WithName name
-                        `contramap` debugTracer,
+                        `contramap` (cmTracer <> debugTracer),
           cmTrTracer  = (WithName name . fmap abstractState)
-                        `contramap` (cmTrTracer <> debugTracer),
+                        `contramap` (trTracer <> debugTracer),
          -- MuxTracer
           cmMuxTracer = muxTracer,
           cmIPv4Address = localAddr,
@@ -341,8 +350,8 @@ withInitiatorOnlyConnectionManager name timeouts cmTrTracer snocket localAddr
           connectionDataFlow = getProtocolDataFlow . snd,
           cmPrunePolicy = simplePrunePolicy,
           cmConnectionsLimits = AcceptedConnectionsLimit {
-              acceptedConnectionsHardLimit = maxBound,
-              acceptedConnectionsSoftLimit = maxBound,
+              acceptedConnectionsHardLimit = bound,
+              acceptedConnectionsSoftLimit = bound,
               acceptedConnectionsDelay     = 0
             },
           cmTimeWaitTimeout = tTimeWaitTimeout timeouts,
@@ -481,6 +490,10 @@ withBidirectionalConnectionManager
     -- ^ identifier (for logging)
     -> Tracer m (WithName name (RemoteTransitionTrace peerAddr))
     -> Tracer m (WithName name (AbstractTransitionTrace peerAddr))
+    -> Tracer m (WithName name
+                          (ConnectionManagerTrace
+                            peerAddr
+                            (ConnectionHandlerTrace UnversionedProtocol DataFlowProtocolData)))
     -> Tracer m (WithName name (InboundGovernorTrace peerAddr))
     -> Snocket m socket peerAddr
     -> socket
@@ -494,6 +507,8 @@ withBidirectionalConnectionManager
     -- manager towards some peer.
     -> ProtocolTimeLimits (Handshake UnversionedProtocol Term)
     -- ^ Handshake time limits
+    -> Word32
+    -- ^ AcceptedConnectionsLimit
     -> (MuxConnectionManager
           InitiatorResponderMode socket peerAddr
           UnversionedProtocol ByteString m [resp] acc
@@ -502,10 +517,11 @@ withBidirectionalConnectionManager
        -> m a)
     -> m a
 withBidirectionalConnectionManager name timeouts
-                                   inboundTrTracer cmTrTracer inboundTracer
+                                   inboundTrTracer trTracer
+                                   cmTracer inboundTracer
                                    snocket socket localAddress
                                    accumulatorInit nextRequests
-                                   handshakeTimeLimits k = do
+                                   handshakeTimeLimits bound k = do
     mainThreadId <- myThreadId
     inbgovControlChannel      <- Server.newControlChannel
     -- we are not using the randomness
@@ -516,9 +532,9 @@ withBidirectionalConnectionManager name timeouts
       ConnectionManagerArguments {
           -- ConnectionManagerTrace
           cmTracer    = WithName name
-                        `contramap` debugTracer,
+                        `contramap` (cmTracer <> debugTracer),
           cmTrTracer  = (WithName name . fmap abstractState)
-                        `contramap` (cmTrTracer <> debugTracer),
+                        `contramap` (trTracer <> debugTracer),
           -- MuxTracer
           cmMuxTracer    = muxTracer,
           cmIPv4Address  = localAddress,
@@ -530,8 +546,8 @@ withBidirectionalConnectionManager name timeouts
           connectionDataFlow = getProtocolDataFlow . snd,
           cmPrunePolicy = simplePrunePolicy,
           cmConnectionsLimits = AcceptedConnectionsLimit {
-              acceptedConnectionsHardLimit = maxBound,
-              acceptedConnectionsSoftLimit = maxBound,
+              acceptedConnectionsHardLimit = bound,
+              acceptedConnectionsSoftLimit = bound,
               acceptedConnectionsDelay     = 0
             }
         }
@@ -568,7 +584,7 @@ withBidirectionalConnectionManager name timeouts
                       WithName name `contramap` debugTracer, -- ServerTrace
                     serverInboundGovernorTracer =
                       WithName name `contramap` inboundTracer, -- InboundGovernorTrace
-                    serverConnectionLimits = AcceptedConnectionsLimit maxBound maxBound 0,
+                    serverConnectionLimits = AcceptedConnectionsLimit bound bound 0,
                     serverConnectionManager = connectionManager,
                     serverInboundIdleTimeout = tProtocolIdleTimeout timeouts,
                     serverControlChannel = inbgovControlChannel,
@@ -580,7 +596,7 @@ withBidirectionalConnectionManager name timeouts
           `catch` \(e :: SomeException) -> do
             throwIO e
   where
-    -- for a bidirectional mux we need to define 'Mu.xMiniProtocolInfo' for each
+    -- for a bidirectional mux we need to define 'Mux.MiniProtocolInfo' for each
     -- protocol for each direction.
     serverMiniProtocolBundle :: Mux.MiniProtocolBundle InitiatorResponderMode
     serverMiniProtocolBundle = Mux.MiniProtocolBundle
@@ -783,14 +799,15 @@ unidirectionalExperiment
 unidirectionalExperiment timeouts snocket socket clientAndServerData = do
     nextReqs <- oneshotNextRequests clientAndServerData
     withInitiatorOnlyConnectionManager
-      "client" timeouts nullTracer snocket Nothing nextReqs timeLimitsHandshake
+      "client" timeouts nullTracer nullTracer snocket Nothing nextReqs timeLimitsHandshake maxBound
       $ \connectionManager ->
         withBidirectionalConnectionManager "server" timeouts
                                            nullTracer nullTracer nullTracer
-                                           snocket socket Nothing
+                                           nullTracer snocket socket Nothing
                                            [accumulatorInit clientAndServerData]
                                            noNextRequests
                                            timeLimitsHandshake
+                                           maxBound
           $ \_ serverAddr _serverAsync -> do
             -- client → server: connect
             (rs :: [Either SomeException (Bundle [resp])]) <-
@@ -892,19 +909,21 @@ bidirectionalExperiment
       nextRequests1 <- oneshotNextRequests clientAndServerData1
       withBidirectionalConnectionManager "node-0" timeouts
                                          nullTracer nullTracer nullTracer
-                                         snocket socket0
+                                         nullTracer snocket socket0
                                          (Just localAddr0)
                                          [accumulatorInit clientAndServerData0]
                                          nextRequests0
                                          noTimeLimitsHandshake
+                                         maxBound
         (\connectionManager0 _serverAddr0 _serverAsync0 ->
           withBidirectionalConnectionManager "node-1" timeouts
                                              nullTracer nullTracer nullTracer
-                                             snocket socket1
+                                             nullTracer snocket socket1
                                              (Just localAddr1)
                                              [accumulatorInit clientAndServerData1]
                                              nextRequests1
                                              noTimeLimitsHandshake
+                                             maxBound
             (\connectionManager1 _serverAddr1 _serverAsync1 -> do
               -- runInitiatorProtocols returns a list of results per each
               -- protocol in each bucket (warm \/ hot \/ established); but
@@ -915,7 +934,7 @@ bidirectionalExperiment
                 ) <-
                 -- Run initiator twice; this tests if the responders on
                 -- the other end are restarted.
-                (replicateM
+                replicateM
                   (numberOfRounds clientAndServerData0)
                   (bracket
                     (withLock useLock lock
@@ -935,9 +954,9 @@ bidirectionalExperiment
                               mux muxBundle
                         Disconnected _ err ->
                           throwIO (userError $ "bidirectionalExperiment: " ++ show err)
-                  )))
+                  ))
                 `concurrently`
-                (replicateM
+                replicateM
                   (numberOfRounds clientAndServerData1)
                   (bracket
                     (withLock useLock lock
@@ -957,7 +976,7 @@ bidirectionalExperiment
                               mux muxBundle
                         Disconnected _ err ->
                           throwIO (userError $ "bidirectionalExperiment: " ++ show err)
-                  )))
+                  ))
 
               pure $
                 foldr
@@ -1075,6 +1094,14 @@ data ConnectionEvent req peerAddr
 newtype MultiNodeScript req peerAddr = MultiNodeScript [ConnectionEvent req peerAddr]
   deriving (Show, Functor)
 
+-- | A sequence of connection events that make up a test scenario for `prop_multinode_Sim_Pruning`.
+-- This test optimizes for triggering prunings.
+data MultiNodePruningScript req =
+  MultiNodePruningScript (Small Word32) -- ^ Hard limit. Should yield small
+                                        --   values to trigger pruning more oftern
+                         [ConnectionEvent req TestAddr]
+  deriving (Show)
+
 -- | To generate well-formed scripts we need to keep track of what nodes are started and what
 --   connections they've made.
 --
@@ -1141,14 +1168,14 @@ instance (Arbitrary peerAddr, Arbitrary req, Eq peerAddr) =>
                     , (4, StartServer             <$> delay <*> newServer <*> arbitrary) ] ++
                     [ (4, InboundConnection       <$> delay <*> elements possibleInboundConnections)        | not $ null possibleInboundConnections] ++
                     [ (4, OutboundConnection      <$> delay <*> elements possibleOutboundConnections)       | not $ null possibleOutboundConnections] ++
-                    [ (4, CloseInboundConnection  <$> delay <*> elements inboundConnections)                | not $ null $ inboundConnections ] ++
-                    [ (4, CloseOutboundConnection <$> delay <*> elements outboundConnections)               | not $ null $ outboundConnections ] ++
+                    [ (4, CloseInboundConnection  <$> delay <*> elements inboundConnections)                | not $ null inboundConnections ] ++
+                    [ (4, CloseOutboundConnection <$> delay <*> elements outboundConnections)               | not $ null outboundConnections ] ++
                     [ (16, InboundMiniprotocols   <$> delay <*> elements inboundConnections  <*> genBundle) | not $ null inboundConnections ] ++
                     [ (16, OutboundMiniprotocols  <$> delay <*> elements outboundConnections <*> genBundle) | not $ null outboundConnections ] ++
-                    [ (8, ShutdownClientServer    <$> delay <*> elements possibleStoppable)                 | not $ null possibleStoppable ]
+                    [ (2, ShutdownClientServer    <$> delay <*> elements possibleStoppable)                 | not $ null possibleStoppable ]
         (event :) <$> go (nextState event s) (n - 1)
         where
-          possibleStoppable  = (startedClients ++ startedServers)
+          possibleStoppable  = startedClients ++ startedServers
           possibleInboundConnections  = (startedClients ++ startedServers) \\ inboundConnections
           possibleOutboundConnections = startedServers \\ outboundConnections
           newClient = arbitrary `suchThat` (`notElem` (startedClients ++ startedServers))
@@ -1233,6 +1260,102 @@ prop_generator_MultiNodeScript (MultiNodeScript script) =
   $ True
 
 
+instance Arbitrary req =>
+         Arbitrary (MultiNodePruningScript req) where
+  arbitrary = do
+    Positive len <- scale ((* 2) . (`div` 3)) arbitrary
+    MultiNodePruningScript <$> arbitrary
+                           <*> go (ScriptState [] [] [] [] []) (len :: Integer)
+   where
+     -- Divide delays by 100 to avoid running in to protocol and SDU timeouts
+     -- if waiting too long between connections and mini protocols.
+     delay = frequency [ (1, pure 0)
+                       , (16, (/ 10) <$> genDelayWithPrecision 2)
+                       , (32, (/ 100) <$> genDelayWithPrecision 2)
+                       , (16, (/ 1000) <$> genDelayWithPrecision 2)
+                       ]
+     go _ 0 = pure []
+     go s@ScriptState{..} n = do
+       event <-
+         frequency $
+           [ (1, StartClient <$> delay <*> newServer)
+           , (16, StartServer <$> delay <*> newServer <*> arbitrary) ] ++
+           [ (4, InboundConnection
+                  <$> delay <*> elements possibleInboundConnections)
+           | not $ null possibleInboundConnections ] ++
+           [ (4, OutboundConnection
+                  <$> delay <*> elements possibleOutboundConnections)
+           | not $ null possibleOutboundConnections] ++
+           [ (4, CloseInboundConnection
+                  <$> delay <*> elements inboundConnections)
+           | not $ null inboundConnections ] ++
+           [ (20, CloseOutboundConnection
+                  <$> delay <*> elements outboundConnections)
+           | not $ null outboundConnections ] ++
+           [ (16, InboundMiniprotocols
+                  <$> delay <*> elements inboundConnections <*> genBundle)
+           | not $ null inboundConnections ] ++
+           [ (4, OutboundMiniprotocols
+                  <$> delay <*> elements outboundConnections <*> genBundle)
+           | not $ null outboundConnections ] ++
+           [ (1, ShutdownClientServer
+                  <$> delay <*> elements possibleStoppable)
+           | not $ null possibleStoppable ]
+       case event of
+         StartServer _ c _ -> do
+           inboundConnection <- InboundConnection <$> delay <*> pure c
+           outboundConnection <- OutboundConnection <$> delay <*> pure c
+           inboundMiniprotocols <- InboundMiniprotocols <$> delay
+                                                       <*> pure c
+                                                       <*> genBundle
+           let events = [ event, inboundConnection
+                        , outboundConnection, inboundMiniprotocols]
+           (events ++) <$> go (foldl' (flip nextState) s events) (n - 1)
+
+         _ -> (event :) <$> go (nextState event s) (n - 1)
+       where
+         possibleStoppable = startedClients ++ startedServers
+         possibleInboundConnections  = (startedClients ++ startedServers)
+                                       \\ inboundConnections
+         possibleOutboundConnections = startedServers \\ outboundConnections
+         newServer = arbitrary `suchThat` (`notElem` possibleStoppable)
+
+  shrink (MultiNodePruningScript bound events) =
+    MultiNodePruningScript
+        <$> shrink bound
+        <*> (makeValid
+            <$> shrinkList shrinkEvent events)
+    where
+      makeValid = go (ScriptState [] [] [] [] [])
+        where
+          go _ [] = []
+          go s (e : es)
+            | isValidEvent e s = e : go (nextState e s) es
+            | otherwise        = go s es
+
+      shrinkDelay = map fromRational . shrink . toRational
+
+      shrinkEvent (StartServer d a p) =
+        (shrink p      <&> \ p' -> StartServer d  a p') ++
+        (shrinkDelay d <&> \ d' -> StartServer d' a p)
+      shrinkEvent (StartClient             d a) =
+        shrinkDelay d <&> \ d' -> StartClient d' a
+      shrinkEvent (InboundConnection       d a) =
+        shrinkDelay d <&> \ d' -> InboundConnection  d' a
+      shrinkEvent (OutboundConnection      d a) =
+        shrinkDelay d <&> \ d' -> OutboundConnection d' a
+      shrinkEvent (CloseInboundConnection  d a) =
+        shrinkDelay d <&> \ d' -> CloseInboundConnection  d' a
+      shrinkEvent (CloseOutboundConnection d a) =
+        shrinkDelay d <&> \ d' -> CloseOutboundConnection d' a
+      shrinkEvent (InboundMiniprotocols    d a r) =
+        (shrinkBundle r <&> \ r' -> InboundMiniprotocols d  a r') ++
+        (shrinkDelay  d <&> \ d' -> InboundMiniprotocols d' a r)
+      shrinkEvent (OutboundMiniprotocols d a r) =
+        (shrinkBundle r <&> \ r' -> OutboundMiniprotocols d  a r') ++
+        (shrinkDelay  d <&> \ d' -> OutboundMiniprotocols d' a r)
+      shrinkEvent (ShutdownClientServer d a) =
+        shrinkDelay d <&> \ d' -> ShutdownClientServer d' a
 
 
 -- | The concrete address type used by simulations.
@@ -1305,17 +1428,22 @@ multinodeExperiment
                           (AbstractTransitionTrace peerAddr))
     -> Tracer m (WithName (Name peerAddr)
                           (InboundGovernorTrace peerAddr))
+    -> Tracer m (WithName (Name peerAddr)
+                          (ConnectionManagerTrace
+                            peerAddr
+                            (ConnectionHandlerTrace UnversionedProtocol DataFlowProtocolData)))
     -> Snocket m socket peerAddr
     -> Snocket.AddressFamily peerAddr
     -- ^ either run the main node in 'Duplex' or 'Unidirectional' mode.
     -> peerAddr
     -> req
     -> DataFlow
+    -> Word32
     -> MultiNodeScript req peerAddr
     -> m ()
-multinodeExperiment inboundTrTracer cmTrTracer inboundTracer
+multinodeExperiment inboundTrTracer trTracer cmTracer inboundTracer
                     snocket addrFamily serverAddr accInit
-                    dataFlow0 (MultiNodeScript script) =
+                    dataFlow0 bound (MultiNodeScript script) =
   withJobPool $ \jobpool -> do
   cc <- startServerConnectionHandler MainServer dataFlow0 [accInit] serverAddr jobpool
   loop (Map.singleton serverAddr [accInit]) (Map.singleton serverAddr cc) script jobpool
@@ -1372,7 +1500,7 @@ multinodeExperiment inboundTrTracer cmTrTracer inboundTracer
 
         ShutdownClientServer delay nodeAddr -> do
           threadDelay delay
-          sendMsg nodeAddr $ Shutdown
+          sendMsg nodeAddr Shutdown
           loop nodeAccs servers events jobpool
       where
         sendMsg :: peerAddr -> ConnectionHandlerMessage peerAddr req -> m ()
@@ -1405,8 +1533,8 @@ multinodeExperiment inboundTrTracer cmTrTracer inboundTracer
         forkJob jobpool
           $ Job
               ( withInitiatorOnlyConnectionManager
-                    name simTimeouts nullTracer snocket (Just localAddr) (mkNextRequests connVar)
-                    timeLimitsHandshake
+                    name simTimeouts nullTracer nullTracer snocket (Just localAddr) (mkNextRequests connVar)
+                    timeLimitsHandshake bound
                   ( \ connectionManager -> do
                     connectionLoop SingInitiatorMode localAddr cc connectionManager Map.empty connVar
                     return Nothing
@@ -1442,10 +1570,11 @@ multinodeExperiment inboundTrTracer cmTrTracer inboundTracer
                 Duplex ->
                   Job ( withBidirectionalConnectionManager
                           name simTimeouts
-                          inboundTrTracer cmTrTracer inboundTracer
+                          inboundTrTracer trTracer inboundTracer cmTracer
                           snocket fd (Just localAddr) serverAcc
                           (mkNextRequests connVar)
                           timeLimitsHandshake
+                          bound
                           ( \ connectionManager _ _serverAsync -> do
                             connectionLoop SingInitiatorResponderMode localAddr cc connectionManager Map.empty connVar
                             return Nothing
@@ -1462,9 +1591,10 @@ multinodeExperiment inboundTrTracer cmTrTracer inboundTracer
                       (show name)
                 Unidirectional ->
                   Job ( withInitiatorOnlyConnectionManager
-                          name simTimeouts cmTrTracer snocket (Just localAddr)
+                          name simTimeouts trTracer inboundTracer snocket (Just localAddr)
                           (mkNextRequests connVar)
                           timeLimitsHandshake
+                          bound
                           ( \ connectionManager -> do
                             connectionLoop SingInitiatorMode localAddr cc connectionManager Map.empty connVar
                             return Nothing
@@ -1552,13 +1682,16 @@ multinodeExperiment inboundTrTracer cmTrTracer inboundTracer
 
 -- | Test property together with classifiction.
 data TestProperty = TestProperty {
-    tpProperty             :: !Property,
+    tpProperty            :: !Property,
     -- ^ 'True' if property is true
 
     tpNumberOfTransitions :: !(Sum Int),
     -- ^ number of all transitions
 
     tpNumberOfConnections :: !(Sum Int),
+    -- ^ number of all connections
+
+    tpNumberOfPrunings    :: !(Sum Int),
     -- ^ number of all connections
 
     --
@@ -1578,6 +1711,7 @@ instance Show TestProperty where
       concat [ "TestProperty "
              , "{ tpNumberOfTransitions = " ++ show (tpNumberOfTransitions tp)
              , ", tpNumberOfConnections = " ++ show (tpNumberOfConnections tp)
+             , ", tpNumberOfPrunings = "    ++ show (tpNumberOfPrunings tp)
              , ", tpNegotiatedDataFlows = " ++ show (tpNegotiatedDataFlows tp)
              , ", tpTerminationTypes = "    ++ show (tpTerminationTypes tp)
              , ", tpActivityTypes = "       ++ show (tpActivityTypes tp)
@@ -1586,8 +1720,8 @@ instance Show TestProperty where
              ]
 
 instance Semigroup TestProperty where
-  (<>) (TestProperty a0 a1 a2 a3 a4 a5 a6 a7)
-       (TestProperty b0 b1 b2 b3 b4 b5 b6 b7) =
+  (<>) (TestProperty a0 a1 a2 a3 a4 a5 a6 a7 a8)
+       (TestProperty b0 b1 b2 b3 b4 b5 b6 b7 b8) =
       TestProperty (a0 .&&. b0)
                    (a1 <> b1)
                    (a2 <> b2)
@@ -1596,16 +1730,18 @@ instance Semigroup TestProperty where
                    (a5 <> b5)
                    (a6 <> b6)
                    (a7 <> b7)
+                   (a8 <> b8)
 
 instance Monoid TestProperty where
     mempty = TestProperty (property True)
-                          mempty mempty mempty
+                          mempty mempty mempty mempty
                           mempty mempty mempty mempty
 
 mkProperty :: TestProperty -> Property
 mkProperty TestProperty { tpProperty
                         , tpNumberOfTransitions = Sum numberOfTransitions_
                         , tpNumberOfConnections = Sum numberOfConnections_
+                        , tpNumberOfPrunings = Sum numberOfPrunings_
                         , tpNegotiatedDataFlows
                         , tpEffectiveDataFlows
                         , tpTerminationTypes
@@ -1620,12 +1756,19 @@ mkProperty TestProperty { tpProperty
                    , show numberOfConnections_
                    ]
            )
+   . tabulate "Pruning"             [show numberOfPrunings_]
    . tabulate "Negotiated DataFlow" (map show tpNegotiatedDataFlows)
    . tabulate "Effective DataFLow"  (map show tpEffectiveDataFlows)
    . tabulate "Termination"         (map show tpTerminationTypes)
    . tabulate "Activity Type"       (map show tpActivityTypes)
    . tabulate "Transitions"         (map ppTransition tpTransitions)
    $ tpProperty
+
+mkPropertyPruning :: TestProperty -> Property
+mkPropertyPruning tp@TestProperty { tpNumberOfPrunings = Sum numberOfPrunings_ } =
+     cover 35 (numberOfPrunings_ > 0) "Prunings"
+   . mkProperty
+   $ tp
 
 newtype AllProperty = AllProperty { getAllProperty :: Property }
 
@@ -1762,7 +1905,7 @@ data Three a b c
 --
 -- TODO: split this test into two.
 prop_multinode_Sim :: Int -> ArbDataFlow -> AbsBearerInfo -> MultiNodeScript Int TestAddr -> Property
-prop_multinode_Sim serverAcc (ArbDataFlow dataFlow) absBi script =
+prop_multinode_Sim serverAcc (ArbDataFlow dataFlow) absBi script@(MultiNodeScript l) =
   let evs :: Octopus (Value ())
                      (Three (RemoteTransitionTrace SimAddr)
                             (AbstractTransitionTrace SimAddr)
@@ -1789,7 +1932,15 @@ prop_multinode_Sim serverAcc (ArbDataFlow dataFlow) absBi script =
                        Nothing
               )
           $ runSimTrace sim
-  in counterexample (ppScript script)
+      evs' :: [ConnectionManagerTrace SimAddr (ConnectionHandlerTrace UnversionedProtocol DataFlowProtocolData)]
+      evs' = fmap wnEvent
+           . filter ((MainServer ==) . wnName)
+           . selectTraceEventsDynamic
+               @()
+               @(WithName (Name SimAddr) (ConnectionManagerTrace SimAddr (ConnectionHandlerTrace UnversionedProtocol DataFlowProtocolData)))
+           $ runSimTrace sim
+  in tabulate "ConnectionEvents" (map showCEvs l)
+    . counterexample (ppScript script)
     . counterexample (ppOctopus show show evs)
     . (\ ( tr1 :: Octopus (Value ()) (RemoteTransitionTrace   SimAddr)
          , tr2 :: Octopus (Value ()) (AbstractTransitionTrace SimAddr)
@@ -1848,6 +1999,7 @@ prop_multinode_Sim serverAcc (ArbDataFlow dataFlow) absBi script =
                    $ trs,
                  tpNumberOfTransitions = Sum (length trs),
                  tpNumberOfConnections = Sum 1,
+                 tpNumberOfPrunings    = classifyPrunings evs',
                  tpNegotiatedDataFlows = [classifyNegotiatedDataFlow trs],
                  tpEffectiveDataFlows  = [classifyEffectiveDataFlow  trs],
                  tpTerminationTypes    = [classifyTermination        trs],
@@ -1882,19 +2034,21 @@ prop_multinode_Sim serverAcc (ArbDataFlow dataFlow) absBi script =
     sim :: IOSim s ()
     sim = do
       mb <- timeout 7200
-              ( withSnocket debugTracer
-                            -- We do this instead of generating a list of
-                            -- 'BearerInfo' where the last element is
-                            -- 'noAttenuation' because we need the last element
-                            -- to run to be 'noAttenuation' and not the last element
-                            -- of the list. The test is designed in this way so we
-                            -- can not do much about it. This is okay because the
-                            -- diffusion simulation will not need to relay on such an
-                            -- invariant; the outbound governor is the component which
-                            -- makes sure that a progress is made.
-                            (Script (toBearerInfo absBi :| [noAttenuation]))
+              ( withSnocket
+                  debugTracer
+                  -- We do this instead of generating a list of
+                  -- 'BearerInfo' where the last element is
+                  -- 'noAttenuation' because we need the last element
+                  -- to run to be 'noAttenuation' and not the last element
+                  -- of the list. The test is designed in this way so we
+                  -- can not do much about it. This is okay because the
+                  -- diffusion simulation will not need to relay on such an
+                  -- invariant; the outbound governor is the component which
+                  -- makes sure that a progress is made.
+                  (Script (toBearerInfo absBi :| [noAttenuation]))
               $ \snocket ->
                  multinodeExperiment (Tracer traceM)
+                                     (Tracer traceM)
                                      (Tracer traceM)
                                      (Tracer traceM)
                                      snocket
@@ -1902,63 +2056,167 @@ prop_multinode_Sim serverAcc (ArbDataFlow dataFlow) absBi script =
                                      (Snocket.TestAddress 0)
                                      serverAcc
                                      dataFlow
+                                     maxBound
                                      (unTestAddr <$> script)
               )
       case mb of
         Nothing -> throwIO (SimulationTimeout :: ExperimentError SimAddr)
         Just a  -> return a
 
-    -- classify negotiated data flow
-    classifyNegotiatedDataFlow :: [AbstractTransition] -> NegotiatedDataFlow
-    classifyNegotiatedDataFlow as =
-      case find ( \ tr
-                 -> case toState tr of
-                      OutboundUniSt    -> True
-                      OutboundDupSt {} -> True
-                      InboundIdleSt {} -> True
-                      _                -> False
-                ) as of
-         Nothing -> NotNegotiated
-         Just tr ->
-           case toState tr of
-             OutboundUniSt      -> NegotiatedDataFlow Unidirectional
-             OutboundDupSt {}   -> NegotiatedDataFlow Duplex
-             (InboundIdleSt df) -> NegotiatedDataFlow df
-             _                  -> error "impossible happened!"
+-- | Property wrapping `multinodeExperiment` that has a generator optimized for triggering
+-- pruning, and random generated number of connections hard limit.
+--
+-- This test tests if with a higher chance of pruning happening and a smaller number of
+-- connections hard limit we do not end up triggering any illegal transition.
+--
+prop_multinode_pruning_Sim :: Int -> MultiNodePruningScript Int -> Property
+prop_multinode_pruning_Sim serverAcc (MultiNodePruningScript (Small bound) l) =
+  let evs :: Octopus (Value ())
+                     (Three (RemoteTransitionTrace SimAddr)
+                            (AbstractTransitionTrace SimAddr)
+                            (InboundGovernorTrace SimAddr))
+      evs = fmap wnEvent
+          . Octopus.filter ((MainServer ==) . wnName)
+          . octoSelectTraceEvents
+              (\ev ->
+                case ev of
+                  EventLog dyn ->
+                        fmap First
+                        <$> fromDynamic
+                              @(WithName (Name SimAddr) (RemoteTransitionTrace   SimAddr))
+                              dyn
+                    <|> fmap Second
+                        <$> fromDynamic
+                              @(WithName (Name SimAddr) (AbstractTransitionTrace SimAddr))
+                              dyn
+                    <|> fmap Third
+                        <$> fromDynamic
+                              @(WithName (Name SimAddr) (InboundGovernorTrace SimAddr))
+                              dyn
+                  _ ->
+                       Nothing
+              )
+          $ runSimTrace sim
+      evs' :: [ConnectionManagerTrace SimAddr (ConnectionHandlerTrace UnversionedProtocol DataFlowProtocolData)]
+      evs' = fmap wnEvent
+           . filter ((MainServer ==) . wnName)
+           . selectTraceEventsDynamic
+               @()
+               @(WithName (Name SimAddr) (ConnectionManagerTrace SimAddr (ConnectionHandlerTrace UnversionedProtocol DataFlowProtocolData)))
+           $ runSimTrace sim
+  in tabulate "ConnectionEvents" (map showCEvs l)
+    . counterexample (ppScript (MultiNodeScript l))
+    . counterexample (ppOctopus show show evs)
+    . (\ ( tr1 :: Octopus (Value ()) (RemoteTransitionTrace   SimAddr)
+         , tr2 :: Octopus (Value ()) (AbstractTransitionTrace SimAddr)
+         , tr3 :: Octopus (Value ()) (InboundGovernorTrace    SimAddr)
+         )
+       ->
+        ( getAllProperty
+        . bifoldMap
+            ( \ _ -> AllProperty (property True))
+            ( \ tr -> case tr of
+                -- verify that 'unregisterInboundConnection' does not return
+                -- 'UnsupportedState'.
+                TrDemotedToColdRemote _ res ->
+                  case res of
+                    UnsupportedState {}
+                      -> AllProperty (counterexample (show tr) False)
+                    _ -> AllProperty (property True)
 
-    -- classify effective data flow
-    classifyEffectiveDataFlow :: [AbstractTransition] -> EffectiveDataFlow
-    classifyEffectiveDataFlow as =
-      case find ((== DuplexSt) . toState) as of
-        Nothing -> EffectiveDataFlow Unidirectional
-        Just _  -> EffectiveDataFlow Duplex
+                -- verify that 'demotedToColdRemote' does not return
+                -- 'UnsupportedState'
+                TrWaitIdleRemote _ res ->
+                  case res of
+                    UnsupportedState {}
+                      -> AllProperty (counterexample (show tr) False)
+                    _ -> AllProperty (property True)
 
-    -- classify termination
-    classifyTermination :: [AbstractTransition] -> TerminationType
-    classifyTermination as =
-      case last $ dropWhileEnd
-                    (== (Transition TerminatedSt TerminatedSt))
-                $ dropWhileEnd
-                    (== (Transition TerminatedSt UnknownConnectionSt))
-                $ as of
-        Transition { fromState = TerminatingSt
-                   , toState   = TerminatedSt
-                   } -> CleanTermination
-        _            -> ErroredTermination
+                _     -> AllProperty (property True)
+            )
 
-    -- classify if a connection is active or not
-    classifyActivityType :: [AbstractTransition] -> ActivityType
-    classifyActivityType as =
-      case find ( \ tr
-                 -> case toState tr of
-                      InboundSt     {} -> True
-                      OutboundUniSt    -> True
-                      OutboundDupSt {} -> True
-                      DuplexSt      {} -> True
-                      _                -> False
-                ) as of
-        Nothing -> IdleConn
-        Just {} -> ActiveConn
+        $ tr3
+        )
+        .&&.
+        ( mkPropertyPruning
+        . bifoldMap
+           ( \ case
+               MainReturn {} -> mempty
+               v             -> mempty { tpProperty = counterexample (show v) False }
+           )
+           ( \ trs
+            -> TestProperty {
+                 tpProperty =
+                     (counterexample $!
+                       (  "\nconnection:\n"
+                       ++ intercalate "\n" (map ppTransition trs))
+                       )
+                   . getAllProperty
+                   . foldMap ( \ tr
+                              -> AllProperty
+                               . (counterexample $!
+                                   (  "\nUnexpected transition: "
+                                   ++ show tr)
+                                   )
+                               . verifyAbstractTransition
+                               $ tr
+                             )
+                   $ trs,
+                 tpNumberOfTransitions = Sum (length trs),
+                 tpNumberOfConnections = Sum 1,
+                 tpNumberOfPrunings    = classifyPrunings evs',
+                 tpNegotiatedDataFlows = [classifyNegotiatedDataFlow trs],
+                 tpEffectiveDataFlows  = [classifyEffectiveDataFlow  trs],
+                 tpTerminationTypes    = [classifyTermination        trs],
+                 tpActivityTypes       = [classifyActivityType       trs],
+                 tpTransitions         = trs
+              }
+           )
+         . splitConns
+         $ tr2
+         )
+         .&&.
+         ( getAllProperty
+         . bifoldMap
+            ( \ _ -> AllProperty (property True) )
+            ( \ TransitionTrace {ttPeerAddr = peerAddr, ttTransition = tr} ->
+                  AllProperty
+                . counterexample (concat [ "Unexpected transition: "
+                                         , show peerAddr
+                                         , " "
+                                         , show tr
+                                         ])
+                . verifyRemoteTransition
+                $ tr
+            )
+         $ tr1
+         )
+
+     )
+   . octoSplit
+   $ evs
+  where
+    sim :: IOSim s ()
+    sim = do
+      mb <- timeout 7200
+                    ( withSnocket sayTracer
+                                  (singletonScript noAttenuation)
+              $ \snocket ->
+                 multinodeExperiment (Tracer traceM)
+                                     (Tracer traceM)
+                                     (Tracer traceM)
+                                     (Tracer traceM)
+                                     snocket
+                                     Snocket.TestFamily
+                                     (Snocket.TestAddress 0)
+                                     serverAcc
+                                     Duplex
+                                     (bound `div` 10)
+                                     (unTestAddr <$> MultiNodeScript l)
+              )
+      case mb of
+        Nothing -> throwIO (SimulationTimeout :: ExperimentError SimAddr)
+        Just a  -> return a
 
 -- Right fold of the 'Octopus' which splits its results.
 --
@@ -2085,6 +2343,81 @@ sayTracer :: (MonadSay m, MonadTime m, Show a) => Tracer m a
 sayTracer = Tracer $
   \msg -> (,msg) <$> getCurrentTime >>= say . show
 
+
+showCEvs :: ConnectionEvent req peerAddr -> String
+showCEvs (StartClient{})             = "StartClient"
+showCEvs (StartServer{})             = "StartServer"
+showCEvs (InboundConnection{})       = "InboundConnection"
+showCEvs (OutboundConnection{})      = "OutboundConnection"
+showCEvs (InboundMiniprotocols{})    = "InboundMiniprotocols"
+showCEvs (OutboundMiniprotocols{})   = "OutboundMiniprotocols"
+showCEvs (CloseInboundConnection{})  = "CloseInboundConnection"
+showCEvs (CloseOutboundConnection{}) = "CloseOutboundConnection"
+showCEvs (ShutdownClientServer{})    = "ShutdownClientServer"
+
+-- classify negotiated data flow
+classifyPrunings :: [ConnectionManagerTrace SimAddr (ConnectionHandlerTrace UnversionedProtocol DataFlowProtocolData)] -> Sum Int
+classifyPrunings =
+  Sum
+  . length
+  . filter ( \ tr
+             -> case tr of
+                  x -> case x of
+                    TrPruneConnections _ -> True
+                    _                    -> False
+           )
+
+-- classify negotiated data flow
+classifyNegotiatedDataFlow :: [AbstractTransition] -> NegotiatedDataFlow
+classifyNegotiatedDataFlow as =
+  case find ( \ tr
+             -> case toState tr of
+                  OutboundUniSt    -> True
+                  OutboundDupSt {} -> True
+                  InboundIdleSt {} -> True
+                  _                -> False
+            ) as of
+     Nothing -> NotNegotiated
+     Just tr ->
+       case toState tr of
+         OutboundUniSt      -> NegotiatedDataFlow Unidirectional
+         OutboundDupSt {}   -> NegotiatedDataFlow Duplex
+         (InboundIdleSt df) -> NegotiatedDataFlow df
+         _                  -> error "impossible happened!"
+
+-- classify effective data flow
+classifyEffectiveDataFlow :: [AbstractTransition] -> EffectiveDataFlow
+classifyEffectiveDataFlow as =
+  case find ((== DuplexSt) . toState) as of
+    Nothing -> EffectiveDataFlow Unidirectional
+    Just _  -> EffectiveDataFlow Duplex
+
+-- classify termination
+classifyTermination :: [AbstractTransition] -> TerminationType
+classifyTermination as =
+  case last $ dropWhileEnd
+                (== (Transition TerminatedSt TerminatedSt))
+            $ dropWhileEnd
+                (== (Transition TerminatedSt UnknownConnectionSt))
+            $ as of
+    Transition { fromState = TerminatingSt
+               , toState   = TerminatedSt
+               } -> CleanTermination
+    _            -> ErroredTermination
+
+-- classify if a connection is active or not
+classifyActivityType :: [AbstractTransition] -> ActivityType
+classifyActivityType as =
+  case find ( \ tr
+             -> case toState tr of
+                  InboundSt     {} -> True
+                  OutboundUniSt    -> True
+                  OutboundDupSt {} -> True
+                  DuplexSt      {} -> True
+                  _                -> False
+            ) as of
+    Nothing -> IdleConn
+    Just {} -> ActiveConn
 
 -- | Redefine this tracer to get valuable tracing information from various
 -- components:
