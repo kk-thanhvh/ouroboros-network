@@ -29,6 +29,7 @@ module Network.TypedProtocol.Proofs (
 
   -- * Connect proof
   connect,
+  connectNonPipelined,
   TerminalStates(..),
 
   -- * Pipelining proofs
