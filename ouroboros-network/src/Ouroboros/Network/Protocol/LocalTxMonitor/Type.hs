@@ -131,6 +131,11 @@ instance Protocol (LocalTxMonitor txid tx slot) where
       :: Bool
       -> Message (LocalTxMonitor txid tx slot) (StBusy StBusyHas) StAcquired
 
+    -- | Release the acquired snapshot, in order to loop back to the idle state.
+    --
+    MsgRelease
+      :: Message (LocalTxMonitor txid tx slot) StAcquired StIdle
+
     -- | The client can terminate the protocol.
     --
     MsgDone

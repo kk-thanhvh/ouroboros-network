@@ -69,6 +69,7 @@ data ServerStAcquired txid tx slot m a = ServerStAcquired
     { recvMsgNextTx :: m (ServerStBusy StBusyNext txid tx slot m a)
     , recvMsgHasTx :: txid -> m (ServerStBusy StBusyHas txid tx slot m a)
     , recvMsgReAcquire :: m (ServerStAcquiring txid tx slot m a)
+    , recvMsgRelease :: m (ServerStIdle txid tx slot m a)
     }
 
 -- In the 'StBusy' protocol state, the server has agency and is responding to one of the client
@@ -121,7 +122,7 @@ localTxMonitorServerPeer (LocalTxMonitorServer mServer) =
       :: ServerStAcquired txid tx slot m a
       -> Peer (LocalTxMonitor txid tx slot) AsServer StAcquired m a
     handleStAcquired = \case
-      ServerStAcquired{recvMsgNextTx, recvMsgHasTx, recvMsgReAcquire} ->
+      ServerStAcquired{recvMsgNextTx, recvMsgHasTx, recvMsgReAcquire, recvMsgRelease} ->
         Await (ClientAgency TokAcquired) $ \case
           MsgNextTx ->
             Effect $ handleStBusyNext <$> recvMsgNextTx
@@ -129,6 +130,8 @@ localTxMonitorServerPeer (LocalTxMonitorServer mServer) =
             Effect $ handleStBusyHas <$> recvMsgHasTx txid
           MsgReAcquire ->
             Effect $ handleStAcquiring <$> recvMsgReAcquire
+          MsgRelease ->
+            Effect $ handleStIdle <$> recvMsgRelease
 
     handleStBusyNext
       :: ServerStBusy StBusyNext txid tx slot m a

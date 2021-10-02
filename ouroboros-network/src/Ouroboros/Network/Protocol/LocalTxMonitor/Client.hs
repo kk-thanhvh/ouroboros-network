@@ -88,6 +88,12 @@ data ClientStAcquired txid tx slot m a where
     :: (slot ->  m (ClientStAcquired txid tx slot m a))
     -> ClientStAcquired txid tx slot m a
 
+  -- | Release the acquired snapshot, in order to loop back to the idle state.
+  --
+  SendMsgRelease
+    :: m (ClientStIdle txid tx slot m a)
+    -> ClientStAcquired txid tx slot m a
+
 -- | Interpret a 'LocalTxMonitorClient' action sequence as a 'Peer' on the client
 -- side of the 'LocalTxMonitor' protocol.
 --
@@ -114,10 +120,6 @@ localTxMonitorClientPeer (LocalTxMonitorClient mClient) =
       :: ClientStAcquired txid tx slot m a
       -> Peer (LocalTxMonitor txid tx slot) AsClient StAcquired m a
     handleStAcquired = \case
-      SendMsgReAcquire stAcquired ->
-        Yield (ClientAgency TokAcquired) MsgReAcquire $
-          Await (ServerAgency TokAcquiring) $ \case
-            MsgAcquired slot -> Effect $ handleStAcquired <$> stAcquired slot
       SendMsgNextTx stAcquired ->
         Yield (ClientAgency TokAcquired) MsgNextTx $
           Await (ServerAgency (TokBusy TokBusyNext)) $ \case
@@ -126,3 +128,10 @@ localTxMonitorClientPeer (LocalTxMonitorClient mClient) =
         Yield (ClientAgency TokAcquired) (MsgHasTx txid) $
           Await (ServerAgency (TokBusy TokBusyHas)) $ \case
             MsgReplyHasTx res -> Effect $ handleStAcquired <$> stAcquired res
+      SendMsgReAcquire stAcquired ->
+        Yield (ClientAgency TokAcquired) MsgReAcquire $
+          Await (ServerAgency TokAcquiring) $ \case
+            MsgAcquired slot -> Effect $ handleStAcquired <$> stAcquired slot
+      SendMsgRelease stIdle ->
+        Yield (ClientAgency TokAcquired) MsgRelease $
+          Effect $ handleStIdle <$> stIdle
