@@ -163,6 +163,10 @@ instance ShelleyBasedEra era => SerialiseResult (ShelleyBlock era) (BlockQuery (
   encodeResult _ _ = encodeShelleyResult
   decodeResult _ _ = decodeShelleyResult
 
+instance ShelleyBasedEra era => SerialiseNodeToClient (ShelleyBlock era) (GenTxId (ShelleyBlock era)) where
+  encodeNodeToClient _ _ = toCBOR
+  decodeNodeToClient _ _ = fromCBOR
+
 {-------------------------------------------------------------------------------
   HFC support
 
