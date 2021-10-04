@@ -483,7 +483,7 @@ instance ShelleyBasedEra era => BasicEnvelopeValidation (ShelleyBlock era) where
 
 instance ShelleyBasedEra era => ValidateEnvelope (ShelleyBlock era) where
   type OtherHeaderEnvelopeError (ShelleyBlock era) =
-    SL.PredicateFailure (SL.CHAIN era)
+    SL.PredicateFailure (CHAIN era)
 
   additionalEnvelopeChecks cfg (TickedPraosLedgerView ledgerView) hdr =
       SL.chainChecks globals (SL.lvChainChecks ledgerView) (shelleyHeaderRaw hdr)
