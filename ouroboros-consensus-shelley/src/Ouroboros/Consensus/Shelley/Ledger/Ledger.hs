@@ -84,7 +84,7 @@ import qualified Cardano.Ledger.Era as Core
 import qualified Cardano.Ledger.Shelley.API as SL
 import qualified Control.State.Transition.Extended as STS
 
-import qualified Cardano.Ledger.Shelley.Rules.Chain as SL (PredicateFailure)
+import qualified Cardano.Ledger.Shelley.Rules.Ledger as SL (PredicateFailure)
 
 import           Ouroboros.Consensus.Shelley.Eras (EraCrypto)
 import           Ouroboros.Consensus.Shelley.Ledger.Block
