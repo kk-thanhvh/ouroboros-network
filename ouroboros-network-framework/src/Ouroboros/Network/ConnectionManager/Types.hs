@@ -821,6 +821,14 @@ data ConnectionManagerTrace peerAddr handlerTrace
   | TrConnectionManagerCounters  !ConnectionManagerCounters
   | TrState                      !(Map peerAddr AbstractState)
   -- ^ traced on SIGUSR1 signal, installed in 'runDataDiffusion'
+  | TrUnexpectedlyMissingConnectionState !(ConnectionId peerAddr)
+  -- ^ This case is unexpected at call site.
+  --
+  -- Shouldn't really be possible to trigger this by a failed lookup on the
+  -- 'ConnectionManagerState' using the 'ConnectionId'\'s peerAddr, during
+  -- connection handler cleanup function. This shouldn't really be possible
+  -- to achieve and its use is mostly for us to be able to be total in our
+  -- case expression over at connection handler cleanup.
   deriving Show
 
 
