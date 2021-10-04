@@ -93,7 +93,7 @@ import           Ouroboros.Consensus.Shelley.Ledger.TPraos ()
 import           Ouroboros.Consensus.Shelley.Protocol (MaxMajorProtVer (..),
                      Ticked (TickedPraosLedgerView))
 import           Ouroboros.Consensus.Shelley.Protocol.Util (isNewEpoch)
-import           Test.Cardano.Ledger.Shelley.Rules.Chain(CHAIN)
+import           Cardano.Ledger.Shelley.Rules.Chain(CHAIN)
 
 {-------------------------------------------------------------------------------
   Ledger errors
